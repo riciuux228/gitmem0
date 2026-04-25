@@ -343,7 +343,7 @@ class ExtractionEngine:
 
             confidence = self.assess_confidence(segment, source)
 
-            if importance < 0.3 or confidence < 0.3:
+            if importance < 0.25 or confidence < 0.25:
                 continue
 
             embedding = self._embedding_engine.embed(segment)

@@ -2,12 +2,12 @@
 """Post-response hook: auto-extract memories from conversation.
 
 Connects to GitMem0 daemon (no model loading).
+Filters out garbage before sending to extraction.
 """
 import json
-import os
+import re
 import socket
 import sys
-from pathlib import Path
 
 DAEMON_HOST = "127.0.0.1"
 DAEMON_PORT = 19840
@@ -15,6 +15,32 @@ DAEMON_PORT = 19840
 
 def _sanitize(s: str) -> str:
     return s.encode("utf-8", errors="ignore").decode("utf-8")
+
+
+def _is_garbage(text: str) -> bool:
+    """Reject text that shouldn't become memories."""
+    if len(text) < 20:
+        return True
+    if len(text) > 5000:
+        return True
+    # JSON metadata
+    if '{"session_id"' in text or '{"transcript_path"' in text:
+        return True
+    if '"hook_event_name"' in text or '"permission_mode"' in text:
+        return True
+    # File paths
+    if re.search(r'[A-Z]:\\Users\\.*\\\.claude\\', text):
+        return True
+    # Markdown table fragments (from hook output)
+    if text.startswith('| ') and '|' in text[2:5]:
+        return True
+    # Garbled encoding markers
+    if '锛' in text or '鈥' in text or 'utf-8' in text.lower():
+        return True
+    # Truncated JSON
+    if text.startswith('{') and '"ok"' not in text and '"data"' not in text:
+        return True
+    return False
 
 
 def _send_to_daemon(req: dict) -> dict:
@@ -40,10 +66,9 @@ def main():
     else:
         conversation = _sanitize(sys.stdin.read().strip())
 
-    if not conversation:
+    if not conversation or _is_garbage(conversation):
         sys.exit(0)
 
-    # Try daemon first
     try:
         result = _send_to_daemon({"action": "extract", "text": conversation, "source": "hook"})
         data = result.get("data", {})

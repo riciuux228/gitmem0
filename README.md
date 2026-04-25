@@ -2,6 +2,8 @@
 
 Git x Mem0: A pure-local, version-controlled memory system for LLMs.
 
+English | [中文](README_zh.md)
+
 GitMem0 gives AI agents persistent memory without external APIs or cloud services. It combines Git-style version tracking with Mem0's intelligent memory layer — all running on your machine.
 
 ## Features

@@ -1,0 +1,52 @@
+[storage]
+# SQLite database path (relative to data directory)
+db_path = "gitmem0.db"
+# Archive file path
+archive_path = "archive.jsonl"
+# Hot cache size (number of memory units)
+hot_cache_size = 100
+# Confidence threshold for L1 (active) vs L2 (archive)
+active_threshold = 0.3
+
+[decay]
+# Decay rate: confidence(t) = initial * e^(-lambda * days)
+# Default: ~70 day half-life
+lambda_rate = 0.01
+# Minimum confidence before auto-archive
+min_confidence = 0.1
+
+[retrieval]
+# Stage 1: top-k per source
+recall_top_k = 20
+# Stage 2: final top-n
+final_top_n = 5
+# RRF constant
+rrf_k = 60
+# Scoring weights
+weight_semantic = 0.25
+weight_bm25 = 0.15
+weight_entity = 0.15
+weight_recency = 0.10
+weight_importance = 0.20
+weight_confidence = 0.15
+weight_redundancy = 0.10
+
+[context]
+# Token budget for context injection
+token_budget = 2000
+# Max memories to inject
+max_memories = 8
+
+[extraction]
+# Minimum importance to store
+min_importance = 0.3
+# Minimum confidence to store
+min_confidence = 0.3
+# Similarity threshold for dedup
+dedup_threshold = 0.85
+
+[embedding]
+# Model name for sentence-transformers (multilingual, good for Chinese)
+model_name = "paraphrase-multilingual-MiniLM-L12-v2"
+# Embedding dimension
+dimension = 384

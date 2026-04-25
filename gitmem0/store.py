@@ -303,6 +303,24 @@ class MemoryStore:
         ).fetchall()
         return [(r["id"], r["rank"]) for r in rows]
 
+    def search_content(self, query: str, limit: int = 20) -> list[str]:
+        """LIKE-based keyword search on content. Works for CJK text where FTS5 fails."""
+        # Split query into tokens (space-separated)
+        tokens = [t.strip() for t in query.split() if t.strip()]
+        if not tokens:
+            return []
+
+        # Each token must appear in content (AND logic)
+        conditions = " AND ".join(["content LIKE ?" for _ in tokens])
+        params = [f"%{t}%" for t in tokens]
+        params.append(limit)
+
+        rows = self._conn.execute(
+            f"SELECT id FROM memories WHERE {conditions} LIMIT ?",
+            params,
+        ).fetchall()
+        return [r["id"] for r in rows]
+
     # ── Entity CRUD ──────────────────────────────────────────────
 
     def add_entity(self, entity: Entity) -> None:

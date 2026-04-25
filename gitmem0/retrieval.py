@@ -69,13 +69,18 @@ class RetrievalEngine:
         if fts_results:
             sources.append([mid for mid, _ in fts_results])
 
-        # (b) Semantic search (only if embeddings are available)
+        # (b) Content LIKE search (CJK fallback — FTS5 can't tokenize Chinese)
+        content_ids = self._store.search_content(query, limit)
+        if content_ids:
+            sources.append(content_ids)
+
+        # (c) Semantic search (only if embeddings are available)
         if self._emb.is_available():
             sem_ids = self._semantic_search(query, limit)
             if sem_ids:
                 sources.append(sem_ids)
 
-        # (c) Entity-based
+        # (d) Entity-based
         entity_ids = self._entity_search(query)
         if entity_ids:
             sources.append(entity_ids)
@@ -185,6 +190,9 @@ class RetrievalEngine:
         # Extract query entity terms for entity relevance
         query_terms = {t.lower() for t in _extract_key_terms(query)}
 
+        # Extract all query tokens (including CJK) for content matching
+        query_tokens = [t.strip().lower() for t in query.split() if t.strip()]
+
         # Load candidate units
         units: list[MemoryUnit] = []
         for cid in candidate_ids:
@@ -236,6 +244,13 @@ class RetrievalEngine:
             # confidence (with decay)
             confidence = compute_confidence(unit)
 
+            # content_match — fraction of query tokens found in content (CJK-aware)
+            content_lower = unit.content.lower()
+            content_match = 0.0
+            if query_tokens:
+                matched = sum(1 for t in query_tokens if t in content_lower)
+                content_match = matched / len(query_tokens)
+
             # redundancy_penalty — max similarity to any already-selected memory
             red_penalty = 0.0
             if already_selected and unit.embedding is not None:
@@ -254,6 +269,13 @@ class RetrievalEngine:
                 + weights["confidence"] * confidence
                 - weights.get("redundancy", 0.15) * red_penalty
             )
+            # Content keyword match: strong boost if query tokens appear in content,
+            # strong penalty if none match (prevents irrelevant high-importance memories)
+            if query_tokens:
+                if content_match > 0:
+                    final_score += 0.5 * content_match
+                else:
+                    final_score -= 0.3
 
             scored.append((final_score, unit))
 

@@ -183,7 +183,7 @@ class DecayEngine:
             confidence=base.confidence,
             source=f"consolidation:{_utcnow().isoformat()}",
             entities=all_entities,
-            supersedes=memories[0].id,
+            supersedes=",".join(m.id for m in memories),
             tags=all_tags,
             embedding=new_embedding,
             layer="L1",

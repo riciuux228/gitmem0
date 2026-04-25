@@ -49,23 +49,47 @@ _TECH_LOOKUP: dict[str, str] = {t.lower(): t for t in TECH_VOCABULARY}
 # ── Relation extraction patterns ───────────────────────────────────────
 
 _RELATION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    # "X prefers/likes/uses/needs Y"
+    # English: "X prefers/likes/uses/needs Y"
     (re.compile(
         r"(\w+)\s+(?:prefers?|likes?|uses?|needs?|loves?|wants?)\s+(\w[\w.+#-]*)",
         re.IGNORECASE,
     ), "prefers"),
-    # "X works on/develops/maintains/builds Y"
+    # English: "X works on/develops/maintains/builds Y"
     (re.compile(
         r"(\w+)\s+(?:works?\s+on|develops?|maintains?|builds?|created?|wrote)\s+(\w[\w.+#-]*)",
         re.IGNORECASE), "works_on"),
-    # "X knows/learned/studied Y"
+    # English: "X knows/learned/studied Y"
     (re.compile(
         r"(\w+)\s+(?:knows?|learned?|studied?|understands?|familiar\s+with)\s+(\w[\w.+#-]*)",
         re.IGNORECASE), "knows"),
-    # "X is a Y"
+    # English: "X is a Y"
     (re.compile(
         r"(\w+)\s+(?:is\s+an?|was\s+an?)\s+(\w[\w.+#-]*)",
         re.IGNORECASE), "is_a"),
+    # English: "using X for/to Y", "with X"
+    (re.compile(
+        r"(?:using|use|used)\s+(\w[\w.+#-]*)\s+(?:for|to)\s+(\w[\w.+#-]*)",
+        re.IGNORECASE), "uses"),
+    # Chinese: "用X写/做/开发Y"
+    (re.compile(
+        r"用\s*([A-Za-z][A-Za-z0-9.+#-]*)\s*(?:写|做|开发|构建|搭建|重写)\s*([A-Za-z][A-Za-z0-9.+#-]*)",
+    ), "uses"),
+    # Chinese: "学习/学X"
+    (re.compile(
+        r"(?:学习|学|在学|正在学)\s*([A-Za-z][A-Za-z0-9.+#-]*)",
+    ), "learning"),
+    # Chinese: "用X" (standalone "using X")
+    (re.compile(
+        r"(?:用|使用|采用)\s*([A-Za-z][A-Za-z0-9.+#-]*)",
+    ), "uses"),
+    # Chinese: "喜欢/偏好X"
+    (re.compile(
+        r"(?:喜欢|偏好|爱用|常用|习惯用)\s*([A-Za-z][A-Za-z0-9.+#-]*)",
+    ), "prefers"),
+    # Chinese: "X后端/前端/项目"
+    (re.compile(
+        r"([A-Za-z][A-Za-z0-9.+#-]*)\s*(?:后端|前端|项目|框架|库|工具|平台|数据库)",
+    ), "related_to"),
 ]
 
 
@@ -86,7 +110,8 @@ class EntityManager:
         found: dict[str, tuple[Entity, EntityType]] = {}
 
         # 1. Technology detection (case-insensitive against known vocab)
-        for word in re.findall(r"\b[A-Za-z][\w.+#-]*\b", text):
+        # Use [A-Za-z0-9] instead of \w to avoid matching Chinese chars
+        for word in re.findall(r"[A-Za-z][A-Za-z0-9.+#-]*", text):
             canonical = _TECH_LOOKUP.get(word.lower())
             if canonical and canonical.lower() not in found:
                 found[canonical.lower()] = (None, EntityType.TECHNOLOGY)
@@ -180,18 +205,50 @@ class EntityManager:
 
         for pattern, rel_type in _RELATION_PATTERNS:
             for m in pattern.finditer(text):
-                subj_text = m.group(1).strip().rstrip(".,;:!?")
-                obj_text = m.group(2).strip().rstrip(".,;:!?")
-                subj = name_lookup.get(subj_text.lower())
-                obj = name_lookup.get(obj_text.lower())
-                if subj and obj and subj.id != obj.id:
-                    key = (subj.id, obj.id, rel_type)
+                # For patterns with 2 groups (subj + obj)
+                if m.lastindex and m.lastindex >= 2:
+                    subj_text = m.group(1).strip().rstrip(".,;:!?")
+                    obj_text = m.group(2).strip().rstrip(".,;:!?")
+                    subj = name_lookup.get(subj_text.lower())
+                    obj = name_lookup.get(obj_text.lower())
+                    if subj and obj and subj.id != obj.id:
+                        key = (subj.id, obj.id, rel_type)
+                        if key not in seen:
+                            seen.add(key)
+                            relations.append(Relation(
+                                source_entity_id=subj.id,
+                                target_entity_id=obj.id,
+                                type=rel_type,
+                            ))
+                # For patterns with 1 group (e.g., "学习X", "用X")
+                elif m.lastindex and m.lastindex >= 1:
+                    obj_text = m.group(1).strip().rstrip(".,;:!?")
+                    obj = name_lookup.get(obj_text.lower())
+                    if obj:
+                        # Link to all other entities in the same text
+                        for other in entities:
+                            if other.id != obj.id:
+                                key = (other.id, obj.id, rel_type)
+                                if key not in seen:
+                                    seen.add(key)
+                                    relations.append(Relation(
+                                        source_entity_id=other.id,
+                                        target_entity_id=obj.id,
+                                        type=rel_type,
+                                    ))
+
+        # Co-occurrence: entities in the same segment are related
+        if len(entities) >= 2:
+            for i, e1 in enumerate(entities):
+                for e2 in entities[i + 1:]:
+                    key = (e1.id, e2.id, "co_occurs")
                     if key not in seen:
                         seen.add(key)
                         relations.append(Relation(
-                            source_entity_id=subj.id,
-                            target_entity_id=obj.id,
-                            type=rel_type,
+                            source_entity_id=e1.id,
+                            target_entity_id=e2.id,
+                            type="co_occurs",
+                            weight=0.5,
                         ))
 
         return relations

@@ -35,6 +35,52 @@ def _is_daemon_running() -> bool:
         return False
 
 
+def _cleanup_stale_pid():
+    """Remove PID file if the process is no longer running."""
+    if not PID_FILE.exists():
+        return
+    try:
+        pid = int(PID_FILE.read_text().strip())
+        # Check if process exists
+        if sys.platform == "win32":
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if handle:
+                kernel32.CloseHandle(handle)
+                return  # Process exists
+        else:
+            os.kill(pid, 0)
+            return  # Process exists
+    except (ValueError, OSError, ProcessLookupError):
+        pass
+    # Process doesn't exist, clean up
+    PID_FILE.unlink(missing_ok=True)
+
+
+def _kill_stale_daemon():
+    """Kill any process that's holding the daemon port."""
+    if not _is_daemon_running():
+        return
+    # Try to send stop command
+    try:
+        _send({"action": "stop"})
+        for _ in range(5):
+            if not _is_daemon_running():
+                return
+            time.sleep(0.5)
+    except Exception:
+        pass
+    # If still running, kill by PID
+    if PID_FILE.exists():
+        try:
+            pid = int(PID_FILE.read_text().strip())
+            os.kill(pid, 9 if sys.platform != "win32" else 15)
+        except (ValueError, OSError):
+            pass
+    PID_FILE.unlink(missing_ok=True)
+
+
 def _send(req: dict) -> dict:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(60)
@@ -53,9 +99,22 @@ def _send(req: dict) -> dict:
 
 
 def _start_daemon():
+    # Clean up stale PID file first
+    _cleanup_stale_pid()
+
+    # If port is occupied by something else, try to kill it
+    if _is_daemon_running():
+        _kill_stale_daemon()
+        time.sleep(1)
+
+    # Log file for debugging startup issues
+    log_dir = Path.home() / ".gitmem0"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "daemon.log"
+
     kwargs = {
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
+        "stdout": open(log_file, "a"),
+        "stderr": subprocess.STDOUT,
         "stdin": subprocess.DEVNULL,
     }
     if sys.platform == "win32":

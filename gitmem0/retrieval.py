@@ -74,19 +74,22 @@ class RetrievalEngine:
         if content_ids:
             sources.append(content_ids)
 
+        # Load all memories once for semantic/entity/recency searches
+        all_memories = self._store.list_memories(limit=5000)
+
         # (c) Semantic search (only if embeddings are available)
         if self._emb.is_available():
-            sem_ids = self._semantic_search(query, limit)
+            sem_ids = self._semantic_search(query, limit, all_memories)
             if sem_ids:
                 sources.append(sem_ids)
 
         # (d) Entity-based
-        entity_ids = self._entity_search(query)
+        entity_ids = self._entity_search(query, all_memories)
         if entity_ids:
             sources.append(entity_ids)
 
-        # (d) Recency — last 30 days
-        recency_ids = self._recency_search(days=30, limit=limit)
+        # (e) Recency — last 30 days
+        recency_ids = self._recency_search(days=30, limit=limit, all_memories=all_memories)
         if recency_ids:
             sources.append(recency_ids)
 
@@ -102,12 +105,11 @@ class RetrievalEngine:
         fused = sorted(rrf_scores, key=rrf_scores.get, reverse=True)
         return fused[:limit]
 
-    def _semantic_search(self, query: str, limit: int) -> list[str]:
+    def _semantic_search(self, query: str, limit: int, all_memories: list[MemoryUnit] | None = None) -> list[str]:
         """Embed query, compare against stored embeddings, return ranked IDs."""
         query_emb = self._emb.embed(query)
-        # Build candidate list from memories that have embeddings
-        # We scan all memories — in a production system this would be ANN-indexed.
-        all_memories = self._store.list_memories(limit=5000)
+        if all_memories is None:
+            all_memories = self._store.list_memories(limit=5000)
         candidates: list[tuple[str, list[float]]] = [
             (m.id, m.embedding) for m in all_memories if m.embedding is not None
         ]
@@ -116,11 +118,14 @@ class RetrievalEngine:
         results = self._emb.most_similar(query_emb, candidates, top_k=limit)
         return [mid for mid, _ in results]
 
-    def _entity_search(self, query: str) -> list[str]:
+    def _entity_search(self, query: str, all_memories: list[MemoryUnit] | None = None) -> list[str]:
         """Extract key terms, match entities, return related memory IDs."""
         terms = _extract_key_terms(query)
         if not terms:
             return []
+
+        if all_memories is None:
+            all_memories = self._store.list_memories(limit=5000)
 
         seen_entity_ids: set[str] = set()
         memory_ids: list[str] = []
@@ -134,7 +139,6 @@ class RetrievalEngine:
             seen_entity_ids.add(entity.id)
 
             # Collect memories that reference this entity
-            all_memories = self._store.list_memories(limit=5000)
             for m in all_memories:
                 if entity.id in m.entities:
                     memory_ids.append(m.id)
@@ -153,10 +157,11 @@ class RetrievalEngine:
 
         return memory_ids
 
-    def _recency_search(self, days: int = 30, limit: int = 20) -> list[str]:
+    def _recency_search(self, days: int = 30, limit: int = 20, all_memories: list[MemoryUnit] | None = None) -> list[str]:
         """Return IDs of memories accessed within the last N days."""
         now = datetime.now(timezone.utc)
-        all_memories = self._store.list_memories(limit=5000)
+        if all_memories is None:
+            all_memories = self._store.list_memories(limit=5000)
         recent: list[tuple[float, str]] = []
         for m in all_memories:
             age_days = (now - m.accessed_at).total_seconds() / 86400.0

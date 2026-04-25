@@ -293,15 +293,35 @@ class MemoryStore:
         self._list_cache.put(cache_key, result)
         return result
 
+    @staticmethod
+    def _sanitize_fts(query: str) -> str:
+        """Escape special FTS5 characters to prevent syntax errors."""
+        # FTS5 special chars: " * + - ( ) : ^ { } ~
+        # Strategy: wrap each token in double quotes for literal matching
+        tokens = query.split()
+        if not tokens:
+            return '""'
+        escaped = []
+        for t in tokens:
+            # Remove any existing double quotes, then wrap
+            t = t.replace('"', '')
+            escaped.append(f'"{t}"')
+        return " ".join(escaped)
+
     def search_fts(self, query: str, limit: int = 20) -> list[tuple[str, float]]:
-        rows = self._conn.execute(
-            """SELECT id, rank FROM memories_fts
-               WHERE memories_fts MATCH ?
-               ORDER BY rank
-               LIMIT ?""",
-            (query, limit),
-        ).fetchall()
-        return [(r["id"], r["rank"]) for r in rows]
+        safe_query = self._sanitize_fts(query)
+        try:
+            rows = self._conn.execute(
+                """SELECT id, rank FROM memories_fts
+                   WHERE memories_fts MATCH ?
+                   ORDER BY rank
+                   LIMIT ?""",
+                (safe_query, limit),
+            ).fetchall()
+            return [(r["id"], r["rank"]) for r in rows]
+        except Exception:
+            # Fallback: return empty on any FTS error
+            return []
 
     def search_content(self, query: str, limit: int = 20) -> list[str]:
         """LIKE-based keyword search on content. Works for CJK text where FTS5 fails."""

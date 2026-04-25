@@ -234,10 +234,43 @@ def _is_daemon_running() -> bool:
 
 def _start_daemon_background():
     """Start daemon as a background process."""
-    # Use subprocess to detach
+    # Clean up stale PID file
+    if PID_FILE.exists():
+        try:
+            pid = int(PID_FILE.read_text().strip())
+            if sys.platform == "win32":
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                handle = kernel32.OpenProcess(0x1000, False, pid)
+                if not handle:
+                    PID_FILE.unlink(missing_ok=True)
+                else:
+                    kernel32.CloseHandle(handle)
+            else:
+                os.kill(pid, 0)
+        except (ValueError, OSError, ProcessLookupError):
+            PID_FILE.unlink(missing_ok=True)
+
+    # If port is occupied, try to stop existing daemon
+    if _is_daemon_running():
+        try:
+            _send_to_daemon({"action": "stop"})
+            for _ in range(5):
+                if not _is_daemon_running():
+                    break
+                time.sleep(0.5)
+        except Exception:
+            pass
+        time.sleep(1)
+
+    # Log file for debugging
+    log_dir = Path.home() / ".gitmem0"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "daemon.log"
+
     kwargs = {
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
+        "stdout": open(log_file, "a"),
+        "stderr": subprocess.STDOUT,
         "stdin": subprocess.DEVNULL,
     }
     if sys.platform == "win32":

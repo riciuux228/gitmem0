@@ -17,30 +17,42 @@ def _sanitize(s: str) -> str:
     return s.encode("utf-8", errors="ignore").decode("utf-8")
 
 
-def _is_garbage(text: str) -> bool:
-    """Reject text that shouldn't become memories."""
-    if len(text) < 20:
-        return True
-    if len(text) > 5000:
+def _is_garbage_line(line: str) -> bool:
+    """Reject a single line that shouldn't become memories."""
+    stripped = line.strip()
+    if len(stripped) < 8:
         return True
     # JSON metadata
-    if '{"session_id"' in text or '{"transcript_path"' in text:
+    if '{"session_id"' in stripped or '{"transcript_path"' in stripped:
         return True
-    if '"hook_event_name"' in text or '"permission_mode"' in text:
+    if '"hook_event_name"' in stripped or '"permission_mode"' in stripped:
         return True
     # File paths
-    if re.search(r'[A-Z]:\\Users\\.*\\\.claude\\', text):
+    if re.search(r'[A-Z]:\\Users\\.*\\\.claude\\', stripped):
         return True
-    # Markdown table fragments (from hook output)
-    if text.startswith('| ') and '|' in text[2:5]:
-        return True
-    # Garbled encoding markers
-    if '锛' in text or '鈥' in text or 'utf-8' in text.lower():
+    # Garbled encoding markers (actual mojibake, not legitimate "utf-8" mentions)
+    if '锛' in stripped or '鈥' in stripped:
         return True
     # Truncated JSON
-    if text.startswith('{') and '"ok"' not in text and '"data"' not in text:
+    if stripped.startswith('{') and '"ok"' not in stripped and '"data"' not in stripped:
         return True
     return False
+
+
+def _is_garbage(text: str) -> bool:
+    """Reject entire text only if it's globally unusable."""
+    if len(text) < 8:
+        return True
+    if len(text) > 20000:
+        return True
+    return False
+
+
+def _filter_garbage_segments(text: str) -> str:
+    """Filter out garbage lines, keeping usable content."""
+    lines = text.split('\n')
+    kept = [line for line in lines if not _is_garbage_line(line)]
+    return '\n'.join(kept)
 
 
 def _send_to_daemon(req: dict) -> dict:
@@ -67,6 +79,11 @@ def main():
         conversation = _sanitize(sys.stdin.read().strip())
 
     if not conversation or _is_garbage(conversation):
+        sys.exit(0)
+
+    # Per-line garbage filtering — keep usable content, drop noise
+    conversation = _filter_garbage_segments(conversation)
+    if not conversation.strip():
         sys.exit(0)
 
     try:

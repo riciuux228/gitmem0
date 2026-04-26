@@ -702,10 +702,20 @@ class MemoryStore:
     # ── Stats ────────────────────────────────────────────────────
 
     def stats(self) -> dict:
+        # Type distribution from SQL (not tracked in-memory counters)
+        type_dist = {}
+        with self._idx_lock:
+            cursor = self._conn.execute(
+                "SELECT type, COUNT(*) FROM memories GROUP BY type"
+            )
+            for row in cursor.fetchall():
+                type_dist[row[0]] = row[1]
+
         # O(1) from in-memory counters — no SQL COUNT
         return {
             "total_memories": self._stats_counters.get("total_memories", 0),
             "layers": dict(self._layer_counters),
+            "type_distribution": type_dist,
             "total_entities": self._stats_counters.get("total_entities", 0),
             "total_relations": self._stats_counters.get("total_relations", 0),
             "fts_cache": {

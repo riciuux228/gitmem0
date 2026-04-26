@@ -278,28 +278,37 @@ class TestGarbageFiltering:
 
     def test_is_garbage_short(self):
         from hooks.post_response import _is_garbage
-        assert _is_garbage("short") is True
+        assert _is_garbage("short") is True  # < 8 chars
 
     def test_is_garbage_long(self):
         from hooks.post_response import _is_garbage
-        assert _is_garbage("x" * 6000) is True
+        assert _is_garbage("x" * 21000) is True  # > 20000 chars
+        assert _is_garbage("x" * 6000) is False  # relaxed from 5000 to 20000
 
-    def test_is_garbage_json_metadata(self):
-        from hooks.post_response import _is_garbage
-        assert _is_garbage('{"session_id":"abc123","transcript_path":"test"}') is True
+    def test_is_garbage_line_json_metadata(self):
+        from hooks.post_response import _is_garbage_line
+        assert _is_garbage_line('{"session_id":"abc123","transcript_path":"test"}') is True
 
-    def test_is_garbage_file_path(self):
-        from hooks.post_response import _is_garbage
-        assert _is_garbage('C:\\Users\\test\\.claude\\settings.json has hooks') is True
+    def test_is_garbage_line_file_path(self):
+        from hooks.post_response import _is_garbage_line
+        assert _is_garbage_line('C:\\Users\\test\\.claude\\settings.json has hooks') is True
 
     def test_is_garbage_valid(self):
         from hooks.post_response import _is_garbage
         text = "I prefer using dark mode for all my development work."
         assert _is_garbage(text) is False
 
-    def test_is_garbage_garbled(self):
-        from hooks.post_response import _is_garbage
-        assert _is_garbage("some text with 锛 garbled encoding") is True
+    def test_is_garbage_line_garbled(self):
+        from hooks.post_response import _is_garbage_line
+        assert _is_garbage_line("some text with 锛 garbled encoding") is True
+
+    def test_filter_garbage_segments(self):
+        from hooks.post_response import _filter_garbage_segments
+        text = "Good line about Python\n{\"session_id\":\"x\"}\nAnother good line"
+        result = _filter_garbage_segments(text)
+        assert "Good line about Python" in result
+        assert "Another good line" in result
+        assert "session_id" not in result
 
 
 # ── Entity Graph Tests ──────────────────────────────────────────────

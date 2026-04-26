@@ -21,6 +21,7 @@ class MemoryType(str, Enum):
     EVENT = "event"            # Events that happened ("Deployed v2.0 on Monday")
     INSIGHT = "insight"        # Derived insights ("React is better for this UI")
     INSTRUCTION = "instruction"  # Directives ("Always use type hints")
+    EXPERIENCE = "experience"  # Lessons learned ("Fixed auth bug: token expiry was wrong")
 
 
 class EntityType(str, Enum):
@@ -37,9 +38,10 @@ class EntityType(str, Enum):
 TYPE_IMPORTANCE_WEIGHTS: dict[MemoryType, float] = {
     MemoryType.PREFERENCE: 0.9,
     MemoryType.INSTRUCTION: 0.9,
+    MemoryType.EXPERIENCE: 0.85,
     MemoryType.INSIGHT: 0.8,
     MemoryType.FACT: 0.7,
-    MemoryType.EVENT: 0.4,
+    MemoryType.EVENT: 0.7,
 }
 
 # Default weights for multi-signal scoring

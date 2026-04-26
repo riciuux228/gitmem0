@@ -96,7 +96,13 @@ class AutoMemory:
         )
         unit = self.entities.link_memory_entities(unit)
         self.store.add_memory(unit)
-        return {"id": unit.id, "content": content, "type": mem_type.value, "imp": importance}
+        return {
+            "id": unit.id,
+            "content": content,
+            "type": mem_type.value,
+            "importance": importance,
+            "stored": True,
+        }
 
     def search(self, query: str, top: int = 3) -> list[dict]:
         results = self.retrieval.search(query, top_n=top)
@@ -109,7 +115,12 @@ class AutoMemory:
         stored = []
         for unit in candidates:
             self.store.add_memory(unit)
-            stored.append({"id": unit.id, "content": unit.content, "type": unit.type.value})
+            stored.append({
+                "id": unit.id,
+                "content": unit.content,
+                "type": unit.type.value,
+                "importance": round(unit.importance, 3),
+            })
         return {"extracted": len(stored), "memories": stored}
 
     def stats(self) -> dict:

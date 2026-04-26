@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gitmem0"
-version = "0.4.0"
+version = "0.4.1"
 description = "Git × Mem0: A version-controlled memory system for LLMs"
 readme = "README.md"
 license = "MIT"

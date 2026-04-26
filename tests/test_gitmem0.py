@@ -205,6 +205,15 @@ class TestStore:
         stats = store.stats()
         assert stats["total_memories"] == 2
 
+    def test_stats_type_distribution(self, store):
+        store.add_memory(MemoryUnit(content="a", type=MemoryType.FACT))
+        store.add_memory(MemoryUnit(content="b", type=MemoryType.FACT))
+        store.add_memory(MemoryUnit(content="c", type=MemoryType.EVENT))
+        stats = store.stats()
+        assert "type_distribution" in stats
+        assert stats["type_distribution"]["fact"] == 2
+        assert stats["type_distribution"]["event"] == 1
+
     def test_entities_tags_roundtrip(self, store):
         m = MemoryUnit(content="test", entities=["e1", "e2"], tags=["t1"])
         store.add_memory(m)
@@ -544,6 +553,35 @@ class TestExtraction:
         assert ext.infer_type("remember to use type hints") == MemoryType.INSTRUCTION
         assert ext.infer_type("yesterday I deployed v2") == MemoryType.EVENT
         assert ext.infer_type("Python is a language") == MemoryType.FACT
+
+    def test_infer_type_experience(self):
+        from gitmem0.extraction import ExtractionEngine
+        from gitmem0.embeddings import EmbeddingEngine
+
+        store_fixture = MemoryStore(":memory:")
+        engine = EmbeddingEngine()
+        em = EntityManager(store_fixture)
+        ext = ExtractionEngine(store_fixture, engine, em)
+
+        assert ext.infer_type("Fixed the auth bug: token expiry was wrong") == MemoryType.EXPERIENCE
+        assert ext.infer_type("Learned that React is better for this UI") == MemoryType.EXPERIENCE
+        assert ext.infer_type("Root cause was a race condition in the worker") == MemoryType.EXPERIENCE
+        # Date-containing text should still be EVENT even with experience keywords
+        assert ext.infer_type("yesterday I fixed a bug") == MemoryType.EVENT
+
+    def test_experience_scoring(self):
+        from gitmem0.extraction import ExtractionEngine
+        from gitmem0.embeddings import EmbeddingEngine
+
+        store_fixture = MemoryStore(":memory:")
+        engine = EmbeddingEngine()
+        em = EntityManager(store_fixture)
+        ext = ExtractionEngine(store_fixture, engine, em)
+
+        exp_score = ext._score_experience("Fixed the deployment bug")
+        assert exp_score == 1.0
+        no_exp_score = ext._score_experience("The weather is nice")
+        assert no_exp_score == 0.0
 
     def test_extract_from_text(self):
         from gitmem0.extraction import ExtractionEngine

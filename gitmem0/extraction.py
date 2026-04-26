@@ -104,6 +104,15 @@ _DATE_TIME_RE = re.compile(
 )
 _NUMBER_RE = re.compile(r"\d+\.?\d*")
 
+_EXPERIENCE_KEYWORDS: list[str] = [
+    "fix", "bug", "error", "issue", "problem", "solution",
+    "learned", "realized", "discovered", "turns out", "root cause",
+    "deploy", "refactor", "debug", "test", "failure", "crash",
+    "workaround", "gotcha", "pitfall", "lesson",
+    "修", "修复", "解决", "发现", "原来", "根本原因",
+    "部署", "重构", "调试", "测试", "失败", "崩溃",
+]
+
 
 class ExtractionEngine:
     """Extracts memory units from raw text."""
@@ -130,20 +139,22 @@ class ExtractionEngine:
     ) -> float:
         """Multi-signal importance scoring.
 
-        Returns a weighted average of five signals on 0.0-1.0 scale.
+        Returns a weighted average of six signals on 0.0-1.0 scale.
         """
         explicit = self._score_explicit(content)
         type_weight = TYPE_IMPORTANCE_WEIGHTS.get(memory_type, 0.5)
-        novelty = self._score_novelty(content)
+        novelty = self._score_novelty(content, memory_type)
         specificity = self._score_specificity(content, entities)
         actionability = self._score_actionability(content)
+        experience = self._score_experience(content)
 
         return (
-            explicit * 0.3
-            + type_weight * 0.2
-            + novelty * 0.2
+            explicit * 0.25
+            + type_weight * 0.15
+            + novelty * 0.15
             + specificity * 0.15
             + actionability * 0.15
+            + experience * 0.15
         )
 
     def _score_explicit(self, content: str) -> float:
@@ -153,8 +164,12 @@ class ExtractionEngine:
                 return 1.0
         return 0.0
 
-    def _score_novelty(self, content: str) -> float:
-        """Novelty = 1.0 - max similarity to existing memories."""
+    def _score_novelty(self, content: str, memory_type: Optional[MemoryType] = None) -> float:
+        """Novelty scoring with type-aware logic.
+
+        For EVENT/EXPERIENCE: repeated mention = more important (inverted).
+        For other types: novelty = 1.0 - max_similarity.
+        """
         existing = self._store.list_memories(limit=200)
         if not existing:
             return 1.0
@@ -173,6 +188,11 @@ class ExtractionEngine:
             return 1.0
 
         max_sim = results[0][1]
+
+        # EVENT/EXPERIENCE: repeated mention signals importance, not redundancy
+        if memory_type in (MemoryType.EVENT, MemoryType.EXPERIENCE):
+            return 0.5 + 0.5 * max_sim
+
         return max(0.0, 1.0 - max_sim)
 
     def _score_specificity(
@@ -223,6 +243,14 @@ class ExtractionEngine:
                 return 1.0
         return 0.0
 
+    def _score_experience(self, content: str) -> float:
+        """Score whether content contains experience/lesson-learned signals."""
+        lower = content.lower()
+        for kw in _EXPERIENCE_KEYWORDS:
+            if kw in lower:
+                return 1.0
+        return 0.0
+
     # ── Confidence assessment ───────────────────────────────────────────
 
     def assess_confidence(
@@ -266,6 +294,10 @@ class ExtractionEngine:
 
         if _DATE_TIME_RE.search(content):
             return MemoryType.EVENT
+
+        # Experience: debugging, fixing, lessons learned
+        if any(kw in lower for kw in _EXPERIENCE_KEYWORDS):
+            return MemoryType.EXPERIENCE
 
         if re.search(r"\b(?:because|therefore|所以|thus|hence|consequently)\b", lower):
             return MemoryType.INSIGHT
@@ -343,7 +375,7 @@ class ExtractionEngine:
 
             confidence = self.assess_confidence(segment, source)
 
-            if importance < 0.25 or confidence < 0.25:
+            if importance < 0.15 or confidence < 0.15:
                 continue
 
             embedding = self._embedding_engine.embed(segment)

@@ -69,6 +69,7 @@ python -m gitmem0.cli consolidate --threshold 0.85
 python -m gitmem0.cli contradictions --dry-run
 python -m gitmem0.cli auto-induct --dry-run
 python -m gitmem0.cli compress --dry-run
+python -m gitmem0.cli metrics
 python -m gitmem0.cli export --format jsonl -o backup.jsonl
 python -m gitmem0.cli migrate re-embed
 ```
@@ -119,22 +120,48 @@ model_name = "paraphrase-multilingual-MiniLM-L12-v2"
 dimension = 384
 
 [llm]
-api_key = ""  # tp-xxxxx（小米 Token Plan）或任意 OpenAI 兼容密钥
-base_url = "https://token-plan-cn.xiaomimimo.com/v1"
-model = "MiMo"
+backend = "mimo"      # mimo | openai | claude | ollama
+api_key = ""          # API 密钥（ollama 不需要）
+base_url = ""         # 自定义 base URL（可选）
+model = ""            # 模型名称（可选，使用后端默认值）
 ```
 
 ## LLM Judge 插件
 
-### 快速配置（小米 Token Plan / OpenAI 兼容 API）
+### 支持的后端
+
+| 后端 | `backend` 值 | 默认模型 | 需要 API Key |
+|------|-------------|---------|-------------|
+| 小米 Token Plan | `mimo` | `MiMo` | 需要（`tp-xxxxx`） |
+| OpenAI | `openai` | `gpt-4o-mini` | 需要 |
+| Claude (Anthropic) | `claude` | `claude-haiku-4-5-20251001` | 需要 |
+| Ollama（本地） | `ollama` | `qwen2.5:7b` | 不需要 |
+
+### 快速配置
 
 在 `~/.gitmem0/config.toml` 中添加：
 
 ```toml
+# 示例：OpenAI
 [llm]
-api_key = "tp-xxxxx"  # 你的 Token Plan API 密钥
-base_url = "https://token-plan-cn.xiaomimimo.com/v1"  # OpenAI 兼容
-model = "MiMo"  # 模型名称
+backend = "openai"
+api_key = "sk-xxxxx"
+model = "gpt-4o-mini"
+
+# 示例：Claude
+[llm]
+backend = "claude"
+api_key = "sk-ant-xxxxx"
+
+# 示例：Ollama（本地，无需 API Key）
+[llm]
+backend = "ollama"
+model = "qwen2.5:7b"
+
+# 示例：小米 Token Plan
+[llm]
+backend = "mimo"
+api_key = "tp-xxxxx"
 ```
 
 或设置环境变量：

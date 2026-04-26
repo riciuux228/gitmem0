@@ -69,6 +69,7 @@ python -m gitmem0.cli consolidate --threshold 0.85
 python -m gitmem0.cli contradictions --dry-run
 python -m gitmem0.cli auto-induct --dry-run
 python -m gitmem0.cli compress --dry-run
+python -m gitmem0.cli metrics
 python -m gitmem0.cli export --format jsonl -o backup.jsonl
 python -m gitmem0.cli migrate re-embed
 ```
@@ -119,22 +120,48 @@ model_name = "paraphrase-multilingual-MiniLM-L12-v2"
 dimension = 384
 
 [llm]
-api_key = ""  # tp-xxxxx (Xiaomi Token Plan) or any OpenAI-compatible key
-base_url = "https://token-plan-cn.xiaomimimo.com/v1"
-model = "MiMo"
+backend = "mimo"      # mimo | openai | claude | ollama
+api_key = ""          # Your API key (not needed for ollama)
+base_url = ""         # Custom base URL (optional)
+model = ""            # Model name (optional, uses backend default)
 ```
 
 ## LLM Judge Plugin
 
-### Quick Setup (Xiaomi Token Plan / OpenAI-compatible API)
+### Supported Backends
+
+| Backend | Config `backend` | Default Model | API Key |
+|---------|-----------------|---------------|---------|
+| Xiaomi Token Plan | `mimo` | `MiMo` | Required (`tp-xxxxx`) |
+| OpenAI | `openai` | `gpt-4o-mini` | Required |
+| Claude (Anthropic) | `claude` | `claude-haiku-4-5-20251001` | Required |
+| Ollama (local) | `ollama` | `qwen2.5:7b` | Not needed |
+
+### Quick Setup
 
 Add to `~/.gitmem0/config.toml`:
 
 ```toml
+# Example: OpenAI
 [llm]
-api_key = "tp-xxxxx"  # Your Token Plan API key
-base_url = "https://token-plan-cn.xiaomimimo.com/v1"  # OpenAI-compatible
-model = "MiMo"  # Model name
+backend = "openai"
+api_key = "sk-xxxxx"
+model = "gpt-4o-mini"
+
+# Example: Claude
+[llm]
+backend = "claude"
+api_key = "sk-ant-xxxxx"
+
+# Example: Ollama (local, no API key)
+[llm]
+backend = "ollama"
+model = "qwen2.5:7b"
+
+# Example: Xiaomi Token Plan
+[llm]
+backend = "mimo"
+api_key = "tp-xxxxx"
 ```
 
 Or set environment variables:

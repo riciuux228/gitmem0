@@ -177,6 +177,8 @@ class MemoryStore:
         self._relation_index: dict[str, list[Relation]] = {}  # entity_id → [Relation, ...]
         self._fts_cache: dict[str, tuple[float, list[tuple[str, float]]]] = {}  # query → (ts, results)
         self._fts_cache_ttl = 300.0  # 5 minutes
+        self._fts_cache_hits = 0
+        self._fts_cache_misses = 0
         self._stats_counters: dict[str, int] = {"total_memories": 0, "total_entities": 0, "total_relations": 0}
         self._layer_counters: dict[str, int] = {}
         self._build_indexes()
@@ -474,9 +476,11 @@ class MemoryStore:
         if cached is not None:
             ts, results = cached
             if now - ts < self._fts_cache_ttl:
+                self._fts_cache_hits += 1
                 return results[:limit]
             else:
                 del self._fts_cache[query]
+        self._fts_cache_misses += 1
         safe_query = self._sanitize_fts(query)
         try:
             rows = self._conn.execute(
@@ -704,4 +708,9 @@ class MemoryStore:
             "layers": dict(self._layer_counters),
             "total_entities": self._stats_counters.get("total_entities", 0),
             "total_relations": self._stats_counters.get("total_relations", 0),
+            "fts_cache": {
+                "size": len(self._fts_cache),
+                "hits": self._fts_cache_hits,
+                "misses": self._fts_cache_misses,
+            },
         }

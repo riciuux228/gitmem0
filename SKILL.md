@@ -219,18 +219,27 @@ This workflow is MANDATORY. Do not skip it. Do not postpone it.
 
 ## LLM Judge Plugin (Optional)
 
-### Quick Setup (Xiaomi Token Plan / OpenAI-compatible)
+### Supported Backends
+
+| Backend | `backend` | Default Model | API Key |
+|---------|----------|---------------|---------|
+| Xiaomi Token Plan | `mimo` | `MiMo` | Required (`tp-xxxxx`) |
+| OpenAI | `openai` | `gpt-4o-mini` | Required |
+| Claude | `claude` | `claude-haiku-4-5-20251001` | Required |
+| Ollama (local) | `ollama` | `qwen2.5:7b` | Not needed |
+
+### Quick Setup
 
 Add to `~/.gitmem0/config.toml`:
 
 ```toml
 [llm]
-api_key = "tp-xxxxx"
-base_url = "https://token-plan-cn.xiaomimimo.com/v1"
-model = "MiMo"
+backend = "openai"  # or: mimo, claude, ollama
+api_key = "sk-xxxxx"  # not needed for ollama
+model = "gpt-4o-mini"  # optional, uses backend default
 ```
 
-Or set environment variables: `GITMEM0_LLM_API_KEY` and `GITMEM0_LLM_BASE_URL`.
+Or set environment variables: `GITMEM0_LLM_API_KEY`, `GITMEM0_LLM_BASE_URL`, `GITMEM0_LLM_BACKEND`, `GITMEM0_LLM_MODEL`.
 
 The daemon auto-detects and enables LLM-assisted scoring. Falls back to rules if API is unavailable.
 
@@ -290,9 +299,9 @@ model_name = "paraphrase-multilingual-MiniLM-L12-v2"
 dimension = 384
 
 [llm]
-api_key = ""  # tp-xxxxx (Xiaomi Token Plan) or any OpenAI-compatible key
-base_url = "https://token-plan-cn.xiaomimimo.com/v1"
-model = "MiMo"
+backend = "mimo"  # mimo | openai | claude | ollama
+api_key = ""      # Your API key (not needed for ollama)
+model = ""        # Optional, uses backend default
 ```
 
 ---

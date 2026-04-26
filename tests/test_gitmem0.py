@@ -779,3 +779,157 @@ class TestLLMJudge:
             assert result == expected, f"Failed for '{resp}': got {result}, expected {expected}"
 
 
+# ── Multi-backend LLM Judge tests ──────────────────────────────────────────
+
+
+class TestLLMBackends:
+    """Test all LLM backends initialize correctly (no API calls)."""
+
+    def test_openai_compatible_init(self):
+        from gitmem0.llm_judge import OpenAICompatibleJudge
+
+        judge = OpenAICompatibleJudge(api_key="test-key", model="gpt-4o-mini")
+        assert judge.enabled is True
+        assert judge._model == "gpt-4o-mini"
+
+    def test_openai_judge_init(self):
+        from gitmem0.llm_judge import OpenAIJudge
+
+        judge = OpenAIJudge(api_key="test-key")
+        assert judge.enabled is True
+        assert "api.openai.com" in judge._base_url
+        assert judge._model == "gpt-4o-mini"
+
+    def test_claude_judge_init(self):
+        from gitmem0.llm_judge import ClaudeJudge
+
+        judge = ClaudeJudge(api_key="test-key")
+        assert judge.enabled is True
+        assert "claude" in judge._model
+
+    def test_claude_judge_disabled(self):
+        from gitmem0.llm_judge import ClaudeJudge
+
+        judge = ClaudeJudge(api_key="")
+        assert judge.enabled is False
+        assert judge.should_remember("test") is None
+        assert judge.summarize(["a", "b"]) is None
+
+    def test_ollama_judge_init(self):
+        from gitmem0.llm_judge import OllamaJudge
+
+        judge = OllamaJudge(model="qwen2.5:7b")
+        assert judge.enabled is True
+        assert "11434" in judge._base_url
+        assert judge._model == "qwen2.5:7b"
+
+    def test_ollama_judge_disabled_without_api_key(self):
+        """OllamaJudge auto-sets api_key='ollama', so it's always enabled."""
+        from gitmem0.llm_judge import OllamaJudge
+
+        judge = OllamaJudge()
+        assert judge.enabled is True  # dummy key "ollama"
+
+    def test_backward_compat_alias(self):
+        from gitmem0.llm_judge import MiMoLLMJudge, OpenAICompatibleJudge
+
+        assert MiMoLLMJudge is OpenAICompatibleJudge
+
+    def test_backend_registry(self):
+        from gitmem0.llm_judge import BACKENDS
+
+        assert "openai" in BACKENDS
+        assert "claude" in BACKENDS
+        assert "ollama" in BACKENDS
+        assert "mimo" in BACKENDS
+        assert "openai_compatible" in BACKENDS
+
+    def test_all_backends_satisfy_protocol(self):
+        from gitmem0.llm_judge import BACKENDS
+        from gitmem0.extraction import LLMJudge
+
+        for name, cls in BACKENDS.items():
+            if name == "ollama":
+                judge = cls()
+            else:
+                judge = cls(api_key="test")
+            assert isinstance(judge, LLMJudge), f"{name} doesn't satisfy LLMJudge protocol"
+
+
+# ── Metrics tests ──────────────────────────────────────────────────────────
+
+
+class TestMetrics:
+    """Test MetricsCollector."""
+
+    def test_record_and_snapshot(self):
+        from gitmem0.metrics import MetricsCollector
+
+        m = MetricsCollector()
+        m.record("search", 10.5, True)
+        m.record("search", 20.0, True)
+        m.record("remember", 5.0, True)
+
+        snap = m.snapshot()
+        assert snap["total_requests"] == 3
+        assert snap["total_errors"] == 0
+        assert "search" in snap["per_action"]
+        assert "remember" in snap["per_action"]
+        assert snap["per_action"]["search"]["count"] == 2
+        assert snap["per_action"]["search"]["avg_ms"] == pytest.approx(15.25, abs=0.1)
+
+    def test_error_tracking(self):
+        from gitmem0.metrics import MetricsCollector
+
+        m = MetricsCollector()
+        m.record("query", 10.0, True)
+        m.record("query", 5.0, False)
+
+        snap = m.snapshot()
+        assert snap["total_errors"] == 1
+        assert snap["per_action"]["query"]["errors"] == 1
+
+    def test_p95_latency(self):
+        from gitmem0.metrics import MetricsCollector
+
+        m = MetricsCollector()
+        for i in range(100):
+            m.record("search", float(i), True)
+
+        snap = m.snapshot()
+        p95 = snap["per_action"]["search"]["p95_ms"]
+        assert p95 == pytest.approx(95.0, abs=1.0)
+
+    def test_sliding_window(self):
+        from gitmem0.metrics import MetricsCollector
+
+        m = MetricsCollector()
+        m.MAX_SAMPLES = 5
+        for i in range(10):
+            m.record("search", float(i), True)
+
+        snap = m.snapshot()
+        # Should only keep last 5 samples (5,6,7,8,9)
+        assert snap["per_action"]["search"]["min_ms"] == 5.0
+        assert snap["per_action"]["search"]["max_ms"] == 9.0
+
+    def test_reset(self):
+        from gitmem0.metrics import MetricsCollector
+
+        m = MetricsCollector()
+        m.record("search", 10.0, True)
+        m.reset()
+
+        snap = m.snapshot()
+        assert snap["total_requests"] == 0
+
+    def test_uptime(self):
+        import time
+        from gitmem0.metrics import MetricsCollector
+
+        m = MetricsCollector()
+        time.sleep(0.1)
+        snap = m.snapshot()
+        assert snap["uptime_seconds"] >= 0.1
+
+

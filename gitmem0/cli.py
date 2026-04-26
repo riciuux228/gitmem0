@@ -390,8 +390,63 @@ def stats(
         print(f"memories={data['total_memories']} entities={data['total_entities']} relations={data['total_relations']}")
         for layer, count in sorted(data["layers"].items()):
             print(f"  {layer}: {count}")
+        fts = data.get("fts_cache", {})
+        if fts:
+            print(f"  fts_cache: size={fts.get('size', 0)} hits={fts.get('hits', 0)} misses={fts.get('misses', 0)}")
     else:
         _ok(data)
+
+
+@app.command()
+def metrics(
+    reset: bool = typer.Option(False, "--reset", help="Reset all counters."),
+    fmt: Optional[str] = typer.Option(None, "--format", "-f"),
+) -> None:
+    """Daemon performance metrics. Returns {ok, data: {uptime, requests, per_action}}."""
+    import socket
+
+    req = {"action": "metrics"}
+    if reset:
+        req["reset"] = True
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(5)
+        s.connect(("127.0.0.1", 19840))
+        s.sendall((json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8"))
+        data = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            if b"\n" in data:
+                break
+        s.close()
+        resp = json.loads(data.decode("utf-8").strip())
+    except (OSError, json.JSONDecodeError) as e:
+        _err(f"Cannot connect to daemon: {e}")
+
+    if not resp.get("ok", False):
+        _err(resp.get("error", "Unknown error"))
+
+    result = resp.get("data", resp)
+
+    if fmt == "text":
+        if reset:
+            print("Metrics reset.")
+            return
+        print(f"uptime: {result.get('uptime_seconds', 0)}s")
+        print(f"total_requests: {result.get('total_requests', 0)}")
+        print(f"total_errors: {result.get('total_errors', 0)}")
+        for action, info in result.get("per_action", {}).items():
+            count = info.get("count", 0)
+            errors = info.get("errors", 0)
+            avg = info.get("avg_ms", "?")
+            p95 = info.get("p95_ms", "?")
+            print(f"  {action}: count={count} errors={errors} avg={avg}ms p95={p95}ms")
+    else:
+        _ok(result)
 
 
 @app.command()

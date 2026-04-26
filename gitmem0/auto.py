@@ -43,6 +43,7 @@ from gitmem0.decay import DecayEngine
 from gitmem0.embeddings import EmbeddingEngine
 from gitmem0.entities import EntityManager
 from gitmem0.extraction import ExtractionEngine
+from gitmem0.metrics import MetricsCollector
 from gitmem0.models import MemoryUnit, MemoryType
 from gitmem0.retrieval import RetrievalEngine
 from gitmem0.store import MemoryStore
@@ -75,6 +76,7 @@ class AutoMemory:
         self.context_builder = ContextBuilder(self.retrieval, self.entities)
         self.versioning = VersionControl(self.store)
         self.decay = DecayEngine(self.store, self.embeddings, llm_judge=llm_judge)
+        self.metrics = MetricsCollector()
 
     def query(self, message: str, token_budget: int = 1500) -> dict:
         context = self.auto_context(message, token_budget)
@@ -122,64 +124,121 @@ class AutoMemory:
             return ""
 
     def handle_request(self, req: dict) -> dict:
-        """Dispatch a JSON request and return result."""
+        """Dispatch a JSON request and return result. Records metrics."""
         action = req.get("action", "query")
+        t0 = time.perf_counter()
         try:
             if action == "query":
-                return self.query(req.get("message", ""), req.get("budget", 1500))
+                result = self.query(req.get("message", ""), req.get("budget", 1500))
             elif action == "remember":
-                return self.remember(
+                result = self.remember(
                     req["content"], req.get("type", "fact"),
                     req.get("importance", 0.5), req.get("source", "cli"),
                     req.get("tags"),
                 )
             elif action == "search":
-                return self.search(req.get("query", ""), req.get("top", 3))
+                result = self.search(req.get("query", ""), req.get("top", 3))
             elif action == "extract":
-                return self.extract(req.get("text", ""), req.get("source", "auto"))
+                result = self.extract(req.get("text", ""), req.get("source", "auto"))
             elif action == "stats":
-                return self.stats()
+                result = self.stats()
+            elif action == "metrics":
+                if req.get("reset"):
+                    self.metrics.reset()
+                    result = {"reset": True}
+                else:
+                    result = self.metrics.snapshot()
             else:
-                return {"error": f"Unknown action: {action}"}
+                result = {"error": f"Unknown action: {action}"}
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            self.metrics.record(action, elapsed_ms, "error" not in result)
+            return result
         except Exception as e:
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            self.metrics.record(action, elapsed_ms, False)
             return {"error": str(e)}
 
 
 def _load_llm_judge():
-    """Try to create an LLM judge from config or environment."""
+    """Try to create an LLM judge from config or environment.
+
+    Supports backends: openai, claude, ollama, mimo, openai_compatible.
+    Config priority: env vars > ~/.gitmem0/config.toml > defaults.
+    """
     import os
 
     # 1. Environment variables (highest priority)
     api_key = os.environ.get("GITMEM0_LLM_API_KEY", "")
     base_url = os.environ.get("GITMEM0_LLM_BASE_URL", "")
+    backend = os.environ.get("GITMEM0_LLM_BACKEND", "")
+    model = os.environ.get("GITMEM0_LLM_MODEL", "")
 
     # 2. Config file
-    if not api_key:
-        config_path = Path.home() / ".gitmem0" / "config.toml"
-        if config_path.exists():
+    config_path = Path.home() / ".gitmem0" / "config.toml"
+    if config_path.exists():
+        try:
+            import tomllib
+        except ImportError:
             try:
-                import tomllib
+                import tomli as tomllib
             except ImportError:
-                try:
-                    import tomli as tomllib
-                except ImportError:
-                    tomllib = None
-            if tomllib is not None:
-                with open(config_path, "rb") as f:
-                    cfg = tomllib.load(f)
-                llm_cfg = cfg.get("llm", {})
-                api_key = api_key or llm_cfg.get("api_key", "")
-                base_url = base_url or llm_cfg.get("base_url", "")
+                tomllib = None
+        if tomllib is not None:
+            with open(config_path, "rb") as f:
+                cfg = tomllib.load(f)
+            llm_cfg = cfg.get("llm", {})
+            api_key = api_key or llm_cfg.get("api_key", "")
+            base_url = base_url or llm_cfg.get("base_url", "")
+            backend = backend or llm_cfg.get("backend", "")
+            model = model or llm_cfg.get("model", "")
 
-    if not api_key:
-        return None
+    # 3. Resolve backend (default: mimo for backward compat)
+    if not backend:
+        backend = "mimo"
 
-    if not base_url:
-        base_url = "https://token-plan-cn.xiaomimimo.com/v1"
-
+    # 4. Instantiate
     try:
-        from gitmem0.llm_judge import MiMoLLMJudge
-        judge = MiMoLLMJudge(api_key=api_key, base_url=base_url)
+        from gitmem0.llm_judge import BACKENDS
+
+        backend_lower = backend.lower()
+        if backend_lower not in BACKENDS:
+            return None
+
+        cls = BACKENDS[backend_lower]
+
+        # Build kwargs based on backend type
+        kwargs = {}
+        if backend_lower == "ollama":
+            # Ollama: no api_key needed, just model + base_url
+            if model:
+                kwargs["model"] = model
+            if base_url:
+                kwargs["base_url"] = base_url
+        elif backend_lower in ("openai",):
+            # OpenAI: api_key + model
+            if not api_key:
+                return None
+            kwargs["api_key"] = api_key
+            if model:
+                kwargs["model"] = model
+        elif backend_lower == "claude":
+            # Claude: api_key + model
+            if not api_key:
+                return None
+            kwargs["api_key"] = api_key
+            if model:
+                kwargs["model"] = model
+        else:
+            # mimo / openai_compatible: api_key + base_url + model
+            if not api_key:
+                return None
+            kwargs["api_key"] = api_key
+            if base_url:
+                kwargs["base_url"] = base_url
+            if model:
+                kwargs["model"] = model
+
+        judge = cls(**kwargs)
         if judge.enabled:
             return judge
     except Exception:

@@ -435,6 +435,61 @@ def consolidate(
 
 
 @app.command()
+def contradictions(
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    threshold: float = typer.Option(0.7, "--threshold", "-t"),
+    fmt: Optional[str] = typer.Option(None, "--format", "-f"),
+) -> None:
+    """Find and resolve contradicting memories. Returns {ok, data: {found, resolved}}."""
+    ctx = _get_ctx()
+    if dry_run:
+        pairs = ctx.decay.detect_contradictions(threshold=threshold)
+        data = [{"id_a": a, "id_b": b, "reason": r} for a, b, r in pairs]
+        if fmt == "text":
+            if not data:
+                print("(no contradictions)")
+            for d in data:
+                print(f"  {d['id_a']} <-> {d['id_b']}: {d['reason']}")
+        else:
+            _ok({"found": len(data), "pairs": data})
+    else:
+        result = ctx.decay.resolve_contradictions()
+        if fmt == "text":
+            print(f"found={result['found']} resolved={result['resolved']}")
+        else:
+            _ok(result)
+
+
+@app.command(name="auto-induct")
+def auto_induct(
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    fmt: Optional[str] = typer.Option(None, "--format", "-f"),
+) -> None:
+    """Auto-induct events into insights. Returns {ok, data: {groups, inducted}}."""
+    ctx = _get_ctx()
+    result = ctx.decay.auto_induct(dry_run=dry_run)
+    if fmt == "text":
+        print(f"groups={result['groups']} inducted={result['inducted']}")
+    else:
+        _ok(result)
+
+
+@app.command()
+def compress(
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    max_group: int = typer.Option(10, "--max-group", "-g"),
+    fmt: Optional[str] = typer.Option(None, "--format", "-f"),
+) -> None:
+    """Compress L2 memories. Returns {ok, data: {groups, compressed, memories_removed}}."""
+    ctx = _get_ctx()
+    result = ctx.decay.compress_l2(max_group_size=max_group, dry_run=dry_run)
+    if fmt == "text":
+        print(f"groups={result['groups']} compressed={result['compressed']} removed={result['memories_removed']}")
+    else:
+        _ok(result)
+
+
+@app.command()
 def export(
     format: str = typer.Option("jsonl", "--format", "-f"),
     output: Optional[str] = typer.Option(None, "--output", "-o"),

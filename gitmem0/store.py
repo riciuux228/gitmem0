@@ -7,8 +7,10 @@ plus FTS5 full-text search and layer management.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
+import time
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -163,6 +165,173 @@ class MemoryStore:
         self._mem_cache = _LRUCache(maxsize=cache_size)
         self._list_cache = _LRUCache(maxsize=100)
         self._cache_dirty = True
+        # In-memory hash table indexes
+        self._idx_lock = threading.Lock()
+        self._memory_index: dict[str, MemoryUnit] = {}
+        self._entity_index: dict[str, Entity] = {}
+        self._entity_name_index: dict[str, Entity] = {}
+        self._entity_to_memories: dict[str, set[str]] = {}
+        self._embedding_index: dict[str, list[float]] = {}
+        # Phase 2: content inverted index + relations index + FTS cache + stats counters
+        self._content_index: dict[str, set[str]] = {}  # token → {memory_id, ...}
+        self._relation_index: dict[str, list[Relation]] = {}  # entity_id → [Relation, ...]
+        self._fts_cache: dict[str, tuple[float, list[tuple[str, float]]]] = {}  # query → (ts, results)
+        self._fts_cache_ttl = 300.0  # 5 minutes
+        self._stats_counters: dict[str, int] = {"total_memories": 0, "total_entities": 0, "total_relations": 0}
+        self._layer_counters: dict[str, int] = {}
+        self._build_indexes()
+
+    @staticmethod
+    def _tokenize_content(text: str) -> list[str]:
+        """Extract ASCII tokens (2+ chars) for inverted index."""
+        return [t.lower() for t in re.findall(r"[A-Za-z][A-Za-z0-9_.+#-]{1,}", text)]
+
+    def _build_indexes(self) -> None:
+        """Build all in-memory indexes from SQLite. Called once at startup."""
+        # Memory indexes
+        rows = self._conn.execute("SELECT * FROM memories").fetchall()
+        for row in rows:
+            unit = _row_to_memory(row)
+            self._memory_index[unit.id] = unit
+            if unit.embedding is not None:
+                self._embedding_index[unit.id] = unit.embedding
+            for eid in unit.entities:
+                self._entity_to_memories.setdefault(eid, set()).add(unit.id)
+            # Content inverted index
+            for token in self._tokenize_content(unit.content):
+                self._content_index.setdefault(token, set()).add(unit.id)
+            # Layer counters
+            self._layer_counters[unit.layer] = self._layer_counters.get(unit.layer, 0) + 1
+        # Entity indexes
+        rows = self._conn.execute("SELECT * FROM entities").fetchall()
+        for row in rows:
+            entity = _row_to_entity(row)
+            self._entity_index[entity.id] = entity
+            self._entity_name_index[entity.name.lower()] = entity
+            for alias in entity.aliases:
+                self._entity_name_index[alias.lower()] = entity
+        # Relation index
+        rows = self._conn.execute("SELECT * FROM relations").fetchall()
+        for row in rows:
+            rel = _row_to_relation(row)
+            self._relation_index.setdefault(rel.source_entity_id, []).append(rel)
+            if rel.target_entity_id != rel.source_entity_id:
+                self._relation_index.setdefault(rel.target_entity_id, []).append(rel)
+        # Stats counters
+        self._stats_counters["total_memories"] = len(self._memory_index)
+        self._stats_counters["total_entities"] = len(self._entity_index)
+        self._stats_counters["total_relations"] = len(rows)
+
+    # ── Index update helpers ───────────────────────────────────────
+
+    def _index_add_memory(self, unit: MemoryUnit) -> None:
+        self._memory_index[unit.id] = unit
+        if unit.embedding is not None:
+            self._embedding_index[unit.id] = unit.embedding
+        for eid in unit.entities:
+            self._entity_to_memories.setdefault(eid, set()).add(unit.id)
+        # Content inverted index
+        for token in self._tokenize_content(unit.content):
+            self._content_index.setdefault(token, set()).add(unit.id)
+        # Stats counters
+        self._stats_counters["total_memories"] = self._stats_counters.get("total_memories", 0) + 1
+        self._layer_counters[unit.layer] = self._layer_counters.get(unit.layer, 0) + 1
+        self._fts_cache.clear()
+
+    def _index_update_memory(self, old: MemoryUnit | None, new: MemoryUnit) -> None:
+        # Content index: diff tokens
+        if old is not None:
+            old_tokens = set(self._tokenize_content(old.content))
+            new_tokens = set(self._tokenize_content(new.content))
+            for token in old_tokens - new_tokens:
+                s = self._content_index.get(token)
+                if s:
+                    s.discard(new.id)
+                    if not s:
+                        del self._content_index[token]
+            for token in new_tokens - old_tokens:
+                self._content_index.setdefault(token, set()).add(new.id)
+            # Layer counter diff
+            if old.layer != new.layer:
+                self._layer_counters[old.layer] = max(0, self._layer_counters.get(old.layer, 1) - 1)
+                self._layer_counters[new.layer] = self._layer_counters.get(new.layer, 0) + 1
+        else:
+            for token in self._tokenize_content(new.content):
+                self._content_index.setdefault(token, set()).add(new.id)
+        self._memory_index[new.id] = new
+        # Update embedding index
+        if new.embedding is not None:
+            self._embedding_index[new.id] = new.embedding
+        elif new.id in self._embedding_index:
+            del self._embedding_index[new.id]
+        # Diff entity lists
+        if old is not None:
+            old_entities = set(old.entities)
+            new_entities = set(new.entities)
+            for eid in old_entities - new_entities:
+                s = self._entity_to_memories.get(eid)
+                if s:
+                    s.discard(new.id)
+                    if not s:
+                        del self._entity_to_memories[eid]
+            for eid in new_entities - old_entities:
+                self._entity_to_memories.setdefault(eid, set()).add(new.id)
+        else:
+            for eid in new.entities:
+                self._entity_to_memories.setdefault(eid, set()).add(new.id)
+        self._fts_cache.clear()
+
+    def _index_delete_memory(self, id: str) -> None:
+        unit = self._memory_index.pop(id, None)
+        self._embedding_index.pop(id, None)
+        if unit is not None:
+            # Content inverted index
+            for token in self._tokenize_content(unit.content):
+                s = self._content_index.get(token)
+                if s:
+                    s.discard(id)
+                    if not s:
+                        del self._content_index[token]
+            # Entity index
+            for eid in unit.entities:
+                s = self._entity_to_memories.get(eid)
+                if s:
+                    s.discard(id)
+                    if not s:
+                        del self._entity_to_memories[eid]
+            # Stats counters
+            self._stats_counters["total_memories"] = max(0, self._stats_counters.get("total_memories", 1) - 1)
+            self._layer_counters[unit.layer] = max(0, self._layer_counters.get(unit.layer, 1) - 1)
+        self._fts_cache.clear()
+
+    def _index_add_entity(self, entity: Entity) -> None:
+        self._entity_index[entity.id] = entity
+        self._entity_name_index[entity.name.lower()] = entity
+        for alias in entity.aliases:
+            self._entity_name_index[alias.lower()] = entity
+        self._stats_counters["total_entities"] = self._stats_counters.get("total_entities", 0) + 1
+
+    def _index_update_entity(self, old: Entity | None, new: Entity) -> None:
+        # Remove old name/aliases from name index
+        if old is not None:
+            self._entity_name_index.pop(old.name.lower(), None)
+            for alias in old.aliases:
+                self._entity_name_index.pop(alias.lower(), None)
+        # Add new
+        self._entity_index[new.id] = new
+        self._entity_name_index[new.name.lower()] = new
+        for alias in new.aliases:
+            self._entity_name_index[alias.lower()] = new
+
+    # ── Public index accessors ─────────────────────────────────────
+
+    def get_entity_memories(self, entity_id: str) -> set[str]:
+        """Return set of memory IDs that reference this entity. O(1) lookup."""
+        return set(self._entity_to_memories.get(entity_id, set()))
+
+    def get_embeddings(self) -> dict[str, list[float]]:
+        """Return copy of embedding index. O(1) + O(n) copy."""
+        return dict(self._embedding_index)
 
     def close(self) -> None:
         self._conn.close()
@@ -203,21 +372,17 @@ class MemoryStore:
             (cur.lastrowid, _sanitize(unit.content), unit.id),
         )
         self._conn.commit()
+        with self._idx_lock:
+            self._index_add_memory(unit)
         self.invalidate_cache()
 
     def get_memory(self, id: str) -> Optional[MemoryUnit]:
-        cached = self._mem_cache.get(("mem", id))
-        if cached is not None:
-            return cached
-        row = self._conn.execute(
-            "SELECT * FROM memories WHERE id = ?", (id,)
-        ).fetchone()
-        result = _row_to_memory(row) if row else None
-        if result is not None:
-            self._mem_cache.put(("mem", id), result)
-        return result
+        # O(1) dict lookup — no SQL needed
+        return self._memory_index.get(id)
 
     def update_memory(self, unit: MemoryUnit) -> None:
+        # Grab old unit from index for entity diff
+        old_unit = self._memory_index.get(unit.id)
         # Sync FTS: delete old row, insert new after update
         old_row = self._conn.execute(
             "SELECT rowid FROM memories WHERE id = ?", (unit.id,)
@@ -254,6 +419,8 @@ class MemoryStore:
                 (old_row["rowid"], _sanitize(unit.content), unit.id),
             )
         self._conn.commit()
+        with self._idx_lock:
+            self._index_update_memory(old_unit, unit)
         self.invalidate_cache()
 
     def delete_memory(self, id: str) -> None:
@@ -266,6 +433,8 @@ class MemoryStore:
                 "DELETE FROM memories_fts WHERE rowid = ?", (old_row["rowid"],)
             )
         self._conn.commit()
+        with self._idx_lock:
+            self._index_delete_memory(id)
         self.invalidate_cache()
 
     def list_memories(
@@ -274,24 +443,14 @@ class MemoryStore:
         layer: Optional[str] = None,
         limit: int = 50,
     ) -> list[MemoryUnit]:
-        cache_key = ("list", type.value if type else None, layer, limit)
-        cached = self._list_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        query = "SELECT * FROM memories WHERE 1=1"
-        params: list = []
+        # From in-memory index, filter + sort
+        units = list(self._memory_index.values())
         if type is not None:
-            query += " AND type = ?"
-            params.append(type.value)
+            units = [u for u in units if u.type == type]
         if layer is not None:
-            query += " AND layer = ?"
-            params.append(layer)
-        query += " ORDER BY created_at DESC LIMIT ?"
-        params.append(limit)
-        rows = self._conn.execute(query, params).fetchall()
-        result = [_row_to_memory(r) for r in rows]
-        self._list_cache.put(cache_key, result)
-        return result
+            units = [u for u in units if u.layer == layer]
+        units.sort(key=lambda u: u.created_at, reverse=True)
+        return units[:limit]
 
     @staticmethod
     def _sanitize_fts(query: str) -> str:
@@ -309,6 +468,15 @@ class MemoryStore:
         return " ".join(escaped)
 
     def search_fts(self, query: str, limit: int = 20) -> list[tuple[str, float]]:
+        # FTS result cache — skip SQLite if query was seen within TTL
+        now = time.monotonic()
+        cached = self._fts_cache.get(query)
+        if cached is not None:
+            ts, results = cached
+            if now - ts < self._fts_cache_ttl:
+                return results[:limit]
+            else:
+                del self._fts_cache[query]
         safe_query = self._sanitize_fts(query)
         try:
             rows = self._conn.execute(
@@ -318,28 +486,77 @@ class MemoryStore:
                    LIMIT ?""",
                 (safe_query, limit),
             ).fetchall()
-            return [(r["id"], r["rank"]) for r in rows]
+            results = [(r["id"], r["rank"]) for r in rows]
         except Exception:
-            # Fallback: return empty on any FTS error
-            return []
+            results = []
+        self._fts_cache[query] = (now, results)
+        return results
 
     def search_content(self, query: str, limit: int = 20) -> list[str]:
-        """LIKE-based keyword search on content. Works for CJK text where FTS5 fails."""
-        # Split query into tokens (space-separated)
+        """Content search: in-memory inverted index for ASCII tokens, SQL LIKE fallback for CJK."""
         tokens = [t.strip() for t in query.split() if t.strip()]
         if not tokens:
             return []
 
-        # Each token must appear in content (AND logic)
-        conditions = " AND ".join(["content LIKE ?" for _ in tokens])
-        params = [f"%{t}%" for t in tokens]
-        params.append(limit)
+        # Classify tokens: ASCII (use inverted index) vs CJK (use SQL LIKE)
+        ascii_tokens = []
+        cjk_tokens = []
+        for t in tokens:
+            if re.search(r"[A-Za-z]{2,}", t):
+                ascii_tokens.append(t.lower())
+            elif re.search(r"[一-鿿㐀-䶿　-〿]", t):
+                cjk_tokens.append(t)
+            else:
+                ascii_tokens.append(t.lower())
 
-        rows = self._conn.execute(
-            f"SELECT id FROM memories WHERE {conditions} LIMIT ?",
-            params,
-        ).fetchall()
-        return [r["id"] for r in rows]
+        candidate_ids: set[str] | None = None
+
+        # In-memory inverted index for ASCII tokens — O(tokens × ~matching_ids)
+        if ascii_tokens:
+            for i, token in enumerate(ascii_tokens):
+                matching = self._content_index.get(token, set())
+                if not matching:
+                    # Try prefix match for partial tokens
+                    matching = set()
+                    for idx_token, mids in self._content_index.items():
+                        if idx_token.startswith(token):
+                            matching.update(mids)
+                if i == 0:
+                    candidate_ids = set(matching)
+                else:
+                    candidate_ids &= matching
+                if not candidate_ids:
+                    return []
+
+        # SQL LIKE fallback for CJK tokens — only over candidates if ASCII narrowed it
+        if cjk_tokens:
+            if candidate_ids is not None and len(candidate_ids) <= limit:
+                # Small candidate set: filter in Python
+                results = []
+                for mid in candidate_ids:
+                    unit = self._memory_index.get(mid)
+                    if unit and all(t in unit.content for t in cjk_tokens):
+                        results.append(mid)
+                        if len(results) >= limit:
+                            break
+                return results
+            else:
+                # No ASCII filter or too many candidates: SQL LIKE
+                conditions = " AND ".join(["content LIKE ?" for _ in cjk_tokens])
+                params = [f"%{t}%" for t in cjk_tokens]
+                params.append(limit)
+                rows = self._conn.execute(
+                    f"SELECT id FROM memories WHERE {conditions} LIMIT ?",
+                    params,
+                ).fetchall()
+                cjk_ids = [r["id"] for r in rows]
+                if candidate_ids is not None:
+                    return [mid for mid in cjk_ids if mid in candidate_ids]
+                return cjk_ids
+
+        if candidate_ids is not None:
+            return list(candidate_ids)[:limit]
+        return []
 
     # ── Entity CRUD ──────────────────────────────────────────────
 
@@ -358,8 +575,11 @@ class MemoryStore:
             ),
         )
         self._conn.commit()
+        with self._idx_lock:
+            self._index_add_entity(entity)
 
     def update_entity(self, entity: Entity) -> None:
+        old_entity = self._entity_index.get(entity.id)
         self._conn.execute(
             """UPDATE entities SET
                name=?, type=?, aliases=?, first_seen=?, last_seen=?, mention_count=?
@@ -375,37 +595,34 @@ class MemoryStore:
             ),
         )
         self._conn.commit()
+        with self._idx_lock:
+            self._index_update_entity(old_entity, entity)
 
     def get_entity(self, id: str) -> Optional[Entity]:
-        row = self._conn.execute(
-            "SELECT * FROM entities WHERE id = ?", (id,)
-        ).fetchone()
-        return _row_to_entity(row) if row else None
+        # O(1) dict lookup
+        return self._entity_index.get(id)
 
     def get_entity_by_name(self, name: str) -> Optional[Entity]:
-        row = self._conn.execute(
-            "SELECT * FROM entities WHERE name = ?", (name,)
-        ).fetchone()
-        return _row_to_entity(row) if row else None
+        # O(1) dict lookup (case-insensitive via lowercase key)
+        return self._entity_name_index.get(name.lower())
 
     def list_entities(
         self,
         type: Optional[EntityType] = None,
         limit: int = 50,
     ) -> list[Entity]:
-        query = "SELECT * FROM entities WHERE 1=1"
-        params: list = []
+        # From in-memory index, filter + sort
+        entities = list(self._entity_index.values())
         if type is not None:
-            query += " AND type = ?"
-            params.append(type.value)
-        query += " ORDER BY mention_count DESC LIMIT ?"
-        params.append(limit)
-        rows = self._conn.execute(query, params).fetchall()
-        return [_row_to_entity(r) for r in rows]
+            entities = [e for e in entities if e.type == type]
+        entities.sort(key=lambda e: e.mention_count, reverse=True)
+        return entities[:limit]
 
     # ── Relation CRUD ────────────────────────────────────────────
 
     def add_relation(self, relation: Relation) -> None:
+        # Remove existing relation with same key if replacing
+        self._remove_relation_from_index(relation.source_entity_id, relation.target_entity_id, relation.type)
         self._conn.execute(
             """INSERT OR REPLACE INTO relations
                (source_entity_id, target_entity_id, type, weight, created_at)
@@ -419,14 +636,31 @@ class MemoryStore:
             ),
         )
         self._conn.commit()
+        # Update relation index
+        with self._idx_lock:
+            self._relation_index.setdefault(relation.source_entity_id, []).append(relation)
+            if relation.target_entity_id != relation.source_entity_id:
+                self._relation_index.setdefault(relation.target_entity_id, []).append(relation)
+            self._stats_counters["total_relations"] = self._stats_counters.get("total_relations", 0) + 1
 
     def get_relations(self, entity_id: str) -> list[Relation]:
-        rows = self._conn.execute(
-            """SELECT * FROM relations
-               WHERE source_entity_id = ? OR target_entity_id = ?""",
-            (entity_id, entity_id),
-        ).fetchall()
-        return [_row_to_relation(r) for r in rows]
+        # O(1) dict lookup — no SQL needed
+        return list(self._relation_index.get(entity_id, []))
+
+    def _remove_relation_from_index(self, source_id: str, target_id: str, rel_type: str) -> None:
+        """Remove a specific relation from the in-memory index."""
+        for eid in (source_id, target_id):
+            rels = self._relation_index.get(eid)
+            if rels:
+                filtered = [r for r in rels if not (
+                    r.source_entity_id == source_id and r.target_entity_id == target_id and r.type == rel_type
+                )]
+                if len(filtered) < len(rels):
+                    self._stats_counters["total_relations"] = max(0, self._stats_counters.get("total_relations", 1) - 1)
+                if filtered:
+                    self._relation_index[eid] = filtered
+                else:
+                    del self._relation_index[eid]
 
     def delete_relation(
         self, source_id: str, target_id: str, type: str
@@ -437,15 +671,15 @@ class MemoryStore:
             (source_id, target_id, type),
         )
         self._conn.commit()
+        with self._idx_lock:
+            self._remove_relation_from_index(source_id, target_id, type)
 
     # ── Layer management ─────────────────────────────────────────
 
     def get_memories_by_layer(self, layer: str) -> list[MemoryUnit]:
-        rows = self._conn.execute(
-            "SELECT * FROM memories WHERE layer = ? ORDER BY created_at DESC",
-            (layer,),
-        ).fetchall()
-        return [_row_to_memory(r) for r in rows]
+        units = [u for u in self._memory_index.values() if u.layer == layer]
+        units.sort(key=lambda u: u.created_at, reverse=True)
+        return units
 
     def move_to_layer(self, memory_id: str, new_layer: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -454,28 +688,20 @@ class MemoryStore:
             (new_layer, now, memory_id),
         )
         self._conn.commit()
+        # Update index: refresh the unit's layer and accessed_at
+        unit = self._memory_index.get(memory_id)
+        if unit is not None:
+            unit.layer = new_layer
+            unit.accessed_at = datetime.fromisoformat(now)
         self.invalidate_cache()
 
     # ── Stats ────────────────────────────────────────────────────
 
     def stats(self) -> dict:
-        layer_rows = self._conn.execute(
-            "SELECT layer, COUNT(*) as cnt FROM memories GROUP BY layer"
-        ).fetchall()
-        layers = {r["layer"]: r["cnt"] for r in layer_rows}
-        total_memories = sum(layers.values())
-
-        total_entities = self._conn.execute(
-            "SELECT COUNT(*) as cnt FROM entities"
-        ).fetchone()["cnt"]
-
-        total_relations = self._conn.execute(
-            "SELECT COUNT(*) as cnt FROM relations"
-        ).fetchone()["cnt"]
-
+        # O(1) from in-memory counters — no SQL COUNT
         return {
-            "total_memories": total_memories,
-            "layers": layers,
-            "total_entities": total_entities,
-            "total_relations": total_relations,
+            "total_memories": self._stats_counters.get("total_memories", 0),
+            "layers": dict(self._layer_counters),
+            "total_entities": self._stats_counters.get("total_entities", 0),
+            "total_relations": self._stats_counters.get("total_relations", 0),
         }

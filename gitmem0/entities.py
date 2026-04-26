@@ -171,7 +171,7 @@ class EntityManager:
         return entities
 
     def _find_entity_by_key(self, key: str) -> Entity | None:
-        """Look up an entity by name key (case-insensitive)."""
+        """Look up an entity by name key (case-insensitive). O(1) via name index."""
         entity = self._store.get_entity_by_name(key.title())
         if entity:
             return entity
@@ -181,10 +181,10 @@ class EntityManager:
             entity = self._store.get_entity_by_name(canonical)
             if entity:
                 return entity
-        # Check all entities with matching name case-insensitively
-        for e in self._store.list_entities(limit=1000):
-            if e.name.lower() == key:
-                return e
+        # Direct lowercase lookup — name index is already case-insensitive
+        entity = self._store.get_entity_by_name(key)
+        if entity:
+            return entity
         return None
 
     # ── Relation extraction ────────────────────────────────────────────

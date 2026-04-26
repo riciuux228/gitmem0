@@ -145,10 +145,53 @@ class AutoMemory:
             return {"error": str(e)}
 
 
+def _load_llm_judge():
+    """Try to create an LLM judge from config or environment."""
+    import os
+
+    # 1. Environment variables (highest priority)
+    api_key = os.environ.get("GITMEM0_LLM_API_KEY", "")
+    base_url = os.environ.get("GITMEM0_LLM_BASE_URL", "")
+
+    # 2. Config file
+    if not api_key:
+        config_path = Path.home() / ".gitmem0" / "config.toml"
+        if config_path.exists():
+            try:
+                import tomllib
+            except ImportError:
+                try:
+                    import tomli as tomllib
+                except ImportError:
+                    tomllib = None
+            if tomllib is not None:
+                with open(config_path, "rb") as f:
+                    cfg = tomllib.load(f)
+                llm_cfg = cfg.get("llm", {})
+                api_key = api_key or llm_cfg.get("api_key", "")
+                base_url = base_url or llm_cfg.get("base_url", "")
+
+    if not api_key:
+        return None
+
+    if not base_url:
+        base_url = "https://token-plan-cn.xiaomimimo.com/v1"
+
+    try:
+        from gitmem0.llm_judge import MiMoLLMJudge
+        judge = MiMoLLMJudge(api_key=api_key, base_url=base_url)
+        if judge.enabled:
+            return judge
+    except Exception:
+        pass
+    return None
+
+
 def get_instance() -> AutoMemory:
     global _instance
     if _instance is None:
-        _instance = AutoMemory()
+        llm_judge = _load_llm_judge()
+        _instance = AutoMemory(llm_judge=llm_judge)
     return _instance
 
 

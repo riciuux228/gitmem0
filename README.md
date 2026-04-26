@@ -12,6 +12,7 @@ GitMem0 gives AI agents persistent memory without external APIs or cloud service
 - **Fast** — daemon architecture, model loads once, queries in <0.05s
 - **Multi-signal retrieval** — semantic search + BM25 + entity graph + recency + importance scoring
 - **Confidence decay** — memories naturally fade over time (exponential decay), archived to L2 when stale
+- **Memory consolidation** — duplicate detection, contradiction resolution, auto-induction (events → insights), L2 compression
 - **Knowledge graph** — entities (person, technology, project...) and relations auto-extracted
 - **Version control** — every memory is immutable like a git commit, with full diff/history
 - **LLM-ready context** — Lost-in-the-Middle arrangement, token budget compression
@@ -61,6 +62,9 @@ python -m gitmem0.cli extract "I always use type hints. Never skip tests."
 python -m gitmem0.cli stats
 python -m gitmem0.cli decay --dry-run
 python -m gitmem0.cli consolidate --threshold 0.85
+python -m gitmem0.cli contradictions --dry-run
+python -m gitmem0.cli auto-induct --dry-run
+python -m gitmem0.cli compress --dry-run
 python -m gitmem0.cli export --format jsonl -o backup.jsonl
 python -m gitmem0.cli migrate re-embed
 ```
@@ -109,9 +113,36 @@ weight_confidence = 0.15
 [embedding]
 model_name = "paraphrase-multilingual-MiniLM-L12-v2"
 dimension = 384
+
+[llm]
+api_key = ""  # tp-xxxxx (Xiaomi Token Plan) or any OpenAI-compatible key
+base_url = "https://token-plan-cn.xiaomimimo.com/v1"
+model = "MiMo"
 ```
 
 ## LLM Judge Plugin
+
+### Quick Setup (Xiaomi Token Plan / OpenAI-compatible API)
+
+Add to `~/.gitmem0/config.toml`:
+
+```toml
+[llm]
+api_key = "tp-xxxxx"  # Your Token Plan API key
+base_url = "https://token-plan-cn.xiaomimimo.com/v1"  # OpenAI-compatible
+model = "MiMo"  # Model name
+```
+
+Or set environment variables:
+
+```bash
+export GITMEM0_LLM_API_KEY="tp-xxxxx"
+export GITMEM0_LLM_BASE_URL="https://token-plan-cn.xiaomimimo.com/v1"
+```
+
+The daemon auto-detects the config and enables LLM-assisted scoring. All methods gracefully fall back to rules if the API is unavailable.
+
+### Custom LLM Judge
 
 Implement the `LLMJudge` protocol to plug in any LLM:
 

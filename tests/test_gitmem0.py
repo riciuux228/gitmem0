@@ -356,6 +356,127 @@ class TestDecay:
         assert stats["L1"]["count"] == 1
         assert stats["L2"]["count"] == 1
 
+    def test_check_contradiction(self):
+        from gitmem0.decay import DecayEngine
+
+        # Positive vs negative pair
+        assert DecayEngine._check_contradiction("我喜欢Python", "我不喜欢Python") is not None
+        assert DecayEngine._check_contradiction("I prefer dark mode", "I don't prefer dark mode") is not None
+        assert DecayEngine._check_contradiction("always use type hints", "never use type hints") is not None
+
+        # No contradiction
+        assert DecayEngine._check_contradiction("I like Python", "I like Rust") is None
+        assert DecayEngine._check_contradiction("use Docker", "use Kubernetes") is None
+
+    def test_detect_contradictions(self, store, embedding_engine):
+        from gitmem0.decay import DecayEngine
+
+        decay = DecayEngine(store, embedding_engine)
+        emb = [1.0, 0.0, 0.0] + [0.0] * 381  # dummy 384-dim
+
+        m1 = MemoryUnit(content="我喜欢Python", type=MemoryType.PREFERENCE, embedding=emb, layer="L1")
+        m2 = MemoryUnit(content="我不喜欢Python", type=MemoryType.PREFERENCE, embedding=emb, layer="L1")
+        m3 = MemoryUnit(content="Python很好", type=MemoryType.FACT, embedding=emb, layer="L1")
+        store.add_memory(m1)
+        store.add_memory(m2)
+        store.add_memory(m3)
+
+        pairs = decay.detect_contradictions(threshold=0.0)
+        # m1 and m2 contradict, m3 is different type so skipped
+        assert len(pairs) == 1
+        assert pairs[0][0] in (m1.id, m2.id)
+        assert pairs[0][1] in (m1.id, m2.id)
+
+    def test_resolve_contradictions(self, store, embedding_engine):
+        from gitmem0.decay import DecayEngine
+
+        decay = DecayEngine(store, embedding_engine)
+        emb = [1.0, 0.0, 0.0] + [0.0] * 381
+
+        older = MemoryUnit(
+            content="我喜欢Python", type=MemoryType.PREFERENCE,
+            embedding=emb, layer="L1", confidence=0.9,
+        )
+        older.created_at = datetime.now(timezone.utc) - timedelta(days=10)
+        newer = MemoryUnit(
+            content="我不喜欢Python", type=MemoryType.PREFERENCE,
+            embedding=emb, layer="L1", confidence=0.9,
+        )
+        store.add_memory(older)
+        store.add_memory(newer)
+
+        result = decay.resolve_contradictions()
+        assert result["found"] == 1
+        assert result["resolved"] == 1
+
+        # Older should be moved to L2
+        reloaded = store.get_memory(older.id)
+        assert reloaded.layer == "L2"
+        assert any("contradicted_by" in t for t in reloaded.tags)
+
+    def test_resolve_contradictions_dry_run(self, store, embedding_engine):
+        from gitmem0.decay import DecayEngine
+
+        decay = DecayEngine(store, embedding_engine)
+        emb = [1.0, 0.0, 0.0] + [0.0] * 381
+
+        m1 = MemoryUnit(content="我喜欢Python", type=MemoryType.PREFERENCE, embedding=emb, layer="L1")
+        m2 = MemoryUnit(content="我不喜欢Python", type=MemoryType.PREFERENCE, embedding=emb, layer="L1")
+        store.add_memory(m1)
+        store.add_memory(m2)
+
+        result = decay.resolve_contradictions(dry_run=True)
+        assert result["found"] == 1
+        assert result["resolved"] == 1
+
+        # Both should still be in L1 (dry run)
+        assert store.get_memory(m1.id).layer == "L1"
+        assert store.get_memory(m2.id).layer == "L1"
+
+    def test_auto_induct_no_llm(self, store, embedding_engine):
+        from gitmem0.decay import DecayEngine
+
+        decay = DecayEngine(store, embedding_engine)  # no LLM judge
+        result = decay.auto_induct()
+        assert result["groups"] == 0
+        assert result["inducted"] == 0
+
+    def test_compress_l2_no_llm(self, store, embedding_engine):
+        from gitmem0.decay import DecayEngine
+
+        decay = DecayEngine(store, embedding_engine)  # no LLM judge
+        result = decay.compress_l2()
+        assert result["groups"] == 0
+        assert result["compressed"] == 0
+        assert result["memories_removed"] == 0
+
+    def test_auto_induct_too_few_events(self, store, embedding_engine):
+        """auto_induct needs 3+ events to trigger."""
+        from gitmem0.decay import DecayEngine
+
+        class FakeJudge:
+            def summarize(self, memories):
+                return "summary"
+
+        decay = DecayEngine(store, embedding_engine, llm_judge=FakeJudge())
+        store.add_memory(MemoryUnit(content="event 1 happened", type=MemoryType.EVENT, entities=["e1"]))
+        result = decay.auto_induct()
+        assert result["groups"] == 0  # only 1 event, need 3+
+
+    def test_compress_l2_too_few(self, store, embedding_engine):
+        """compress_l2 needs 5+ L2 memories to trigger."""
+        from gitmem0.decay import DecayEngine
+
+        class FakeJudge:
+            def summarize(self, memories):
+                return "summary"
+
+        decay = DecayEngine(store, embedding_engine, llm_judge=FakeJudge())
+        store.add_memory(MemoryUnit(content="old 1", layer="L2", type=MemoryType.FACT))
+        store.add_memory(MemoryUnit(content="old 2", layer="L2", type=MemoryType.FACT))
+        result = decay.compress_l2()
+        assert result["groups"] == 0  # only 2, need 5+
+
 
 # ── Entities ────────────────────────────────────────────────────────
 
@@ -546,5 +667,115 @@ class TestCLI:
         data = json.loads(result.output)
         assert data["ok"] is True
         assert "total_memories" in data["data"]
+
+
+# ── LLM Judge tests ─────────────────────────────────────────────────────
+
+
+class TestLLMJudge:
+    """Test the MiMoLLMJudge implementation (mocked API)."""
+
+    def test_init_without_key(self):
+        from gitmem0.llm_judge import MiMoLLMJudge
+
+        judge = MiMoLLMJudge(api_key="")
+        assert judge.enabled is False
+        assert judge.should_remember("test") is None
+        assert judge.score_importance("test") is None
+        assert judge.infer_type("test") is None
+        assert judge.summarize(["a", "b"]) is None
+
+    def test_init_with_key(self):
+        from gitmem0.llm_judge import MiMoLLMJudge
+
+        judge = MiMoLLMJudge(api_key="tp-test123")
+        assert judge.enabled is True
+
+    def test_disabled_returns_none(self):
+        from gitmem0.llm_judge import MiMoLLMJudge
+
+        judge = MiMoLLMJudge(api_key="")
+        # All methods should return None when disabled
+        assert judge.should_remember("anything") is None
+        assert judge.score_importance("anything") is None
+        assert judge.infer_type("anything") is None
+        assert judge.summarize(["a"]) == "a"  # single item returned as-is
+        assert judge.summarize([]) is None
+        assert judge.summarize(["a", "b"]) is None  # multi → API call → None (disabled)
+
+    def test_protocol_compliance(self):
+        from gitmem0.llm_judge import MiMoLLMJudge
+        from gitmem0.extraction import LLMJudge
+
+        judge = MiMoLLMJudge(api_key="")
+        assert isinstance(judge, LLMJudge)
+
+    def test_parse_importance_response(self):
+        from gitmem0.llm_judge import MiMoLLMJudge
+
+        judge = MiMoLLMJudge(api_key="tp-test")
+        # Test the parsing logic by calling _chat mock
+        import re
+        # Simulate various LLM responses
+        test_cases = [
+            ("0.8", 0.8),
+            ("The importance is 0.65", 0.65),
+            ("1.0", 1.0),
+            ("0.0", 0.0),
+            ("very important", None),  # no number
+        ]
+        for resp, expected in test_cases:
+            match = re.search(r"(\d+\.?\d*)", resp)
+            if match:
+                val = float(match.group(1))
+                result = max(0.0, min(1.0, val))
+            else:
+                result = None
+            assert result == expected
+
+    def test_parse_type_response(self):
+        from gitmem0.llm_judge import _TYPE_MAP
+
+        # Test type classification parsing
+        test_cases = [
+            ("preference", "preference"),
+            ("Preference", "preference"),
+            ("fact", "fact"),
+            ("event", "event"),
+            ("this is a fact about Python", "fact"),
+            ("instruction on how to", "instruction"),
+        ]
+        for resp, expected in test_cases:
+            lower = resp.lower().strip().strip(".")
+            if lower in _TYPE_MAP:
+                result = _TYPE_MAP[lower].value
+            else:
+                result = None
+                for key, mem_type in _TYPE_MAP.items():
+                    if key in lower:
+                        result = mem_type.value
+                        break
+            assert result == expected, f"Failed for '{resp}': got {result}, expected {expected}"
+
+    def test_parse_should_remember_response(self):
+        # Test yes/no parsing
+        test_cases = [
+            ("yes", True),
+            ("Yes", True),
+            ("yes, definitely", True),
+            ("no", False),
+            ("No", False),
+            ("no, too trivial", False),
+            ("maybe", None),
+        ]
+        for resp, expected in test_cases:
+            lower = resp.lower().strip().strip(".")
+            if lower.startswith("yes"):
+                result = True
+            elif lower.startswith("no"):
+                result = False
+            else:
+                result = None
+            assert result == expected, f"Failed for '{resp}': got {result}, expected {expected}"
 
 

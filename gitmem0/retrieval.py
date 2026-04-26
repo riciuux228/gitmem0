@@ -108,11 +108,9 @@ class RetrievalEngine:
     def _semantic_search(self, query: str, limit: int, all_memories: list[MemoryUnit] | None = None) -> list[str]:
         """Embed query, compare against stored embeddings, return ranked IDs."""
         query_emb = self._emb.embed(query)
-        if all_memories is None:
-            all_memories = self._store.list_memories(limit=5000)
-        candidates: list[tuple[str, list[float]]] = [
-            (m.id, m.embedding) for m in all_memories if m.embedding is not None
-        ]
+        # O(1) retrieval from embedding index — no full memory scan
+        emb_map = self._store.get_embeddings()
+        candidates: list[tuple[str, list[float]]] = list(emb_map.items())
         if not candidates:
             return []
         results = self._emb.most_similar(query_emb, candidates, top_k=limit)
@@ -123,9 +121,6 @@ class RetrievalEngine:
         terms = _extract_key_terms(query)
         if not terms:
             return []
-
-        if all_memories is None:
-            all_memories = self._store.list_memories(limit=5000)
 
         seen_entity_ids: set[str] = set()
         memory_ids: list[str] = []
@@ -138,10 +133,10 @@ class RetrievalEngine:
                 continue
             seen_entity_ids.add(entity.id)
 
-            # Collect memories that reference this entity
-            for m in all_memories:
-                if entity.id in m.entities:
-                    memory_ids.append(m.id)
+            # O(1) reverse index lookup — no full memory scan
+            for mid in self._store.get_entity_memories(entity.id):
+                if mid not in memory_ids:
+                    memory_ids.append(mid)
 
             # Walk relations to get connected entity memories
             relations = self._store.get_relations(entity.id)
@@ -151,9 +146,9 @@ class RetrievalEngine:
                     if rel.source_entity_id == entity.id
                     else rel.source_entity_id
                 )
-                for m in all_memories:
-                    if connected_id in m.entities and m.id not in memory_ids:
-                        memory_ids.append(m.id)
+                for mid in self._store.get_entity_memories(connected_id):
+                    if mid not in memory_ids:
+                        memory_ids.append(mid)
 
         return memory_ids
 

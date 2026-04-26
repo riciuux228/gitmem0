@@ -7,6 +7,8 @@ duplicate/near-duplicate memories are consolidated to keep the store lean.
 from __future__ import annotations
 
 import math
+import re
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
@@ -20,6 +22,19 @@ if TYPE_CHECKING:
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# ── Contradiction detection patterns ─────────────────────────────────────
+
+_CONTRADICTION_PAIRS: list[tuple[str, str]] = [
+    # (positive, negative) — if one memory matches positive and another matches negative
+    ("喜欢", "不喜欢"), ("偏好", "不偏好"), ("prefer", "don't prefer"),
+    ("喜欢", "讨厌"), ("prefer", "dislike"),
+    ("是", "不是"), ("use", "don't use"), ("用", "不用"),
+    ("always", "never"), ("总是", "从不"),
+    ("应该", "不应该"), ("should", "should not"),
+    ("开启", "关闭"), ("enable", "disable"), ("打开", "关闭"),
+]
 
 
 class DecayEngine:
@@ -221,6 +236,226 @@ class DecayEngine:
             consolidated += 1
 
         return {"groups_found": groups_found, "consolidated": consolidated}
+
+    # ── Contradiction detection ─────────────────────────────────────────
+
+    def detect_contradictions(self, threshold: float = 0.7) -> list[tuple[str, str, str]]:
+        """Find pairs of L1 memories that contradict each other.
+
+        Returns list of (id_a, id_b, reason) tuples.
+        """
+        l1 = [m for m in self._store.list_memories(layer="L1") if m.embedding is not None]
+        if len(l1) < 2:
+            return []
+
+        contradictions: list[tuple[str, str, str]] = []
+
+        for i in range(len(l1)):
+            for j in range(i + 1, len(l1)):
+                ma, mb = l1[i], l1[j]
+
+                # Must be same type to contradict
+                if ma.type != mb.type:
+                    continue
+
+                # Must be semantically similar (about the same topic)
+                sim = self._engine.similarity(ma.embedding, mb.embedding)  # type: ignore[arg-type]
+                if sim < threshold:
+                    continue
+
+                # Check contradiction patterns
+                reason = self._check_contradiction(ma.content, mb.content)
+                if reason:
+                    contradictions.append((ma.id, mb.id, reason))
+
+        return contradictions
+
+    @staticmethod
+    def _check_contradiction(content_a: str, content_b: str) -> str | None:
+        """Check if two contents contradict each other via pattern matching."""
+        lower_a = content_a.lower()
+        lower_b = content_b.lower()
+
+        for pos, neg in _CONTRADICTION_PAIRS:
+            # Case 1: A has positive, B has negative
+            if pos in lower_a and neg in lower_b:
+                return f"'{pos}' vs '{neg}'"
+            # Case 2: A has negative, B has positive
+            if neg in lower_a and pos in lower_b:
+                return f"'{neg}' vs '{pos}'"
+
+        return None
+
+    def resolve_contradictions(self, dry_run: bool = False) -> dict[str, int]:
+        """Find and resolve contradictions by keeping the newer memory.
+
+        Returns {"found": N, "resolved": N}.
+        """
+        contradictions = self.detect_contradictions()
+        resolved = 0
+
+        for id_a, id_b, reason in contradictions:
+            ma = self._store.get_memory(id_a)
+            mb = self._store.get_memory(id_b)
+            if ma is None or mb is None:
+                continue
+
+            # Keep the newer one, archive the older
+            older, newer = (ma, mb) if ma.created_at < mb.created_at else (mb, ma)
+
+            if not dry_run:
+                # Tag the older as contradicted and move to L2
+                older.tags.append(f"contradicted_by:{newer.id}")
+                older.tags.append(f"reason:{reason}")
+                self._store.update_memory(older)
+                self._store.move_to_layer(older.id, "L2")
+            resolved += 1
+
+        return {"found": len(contradictions), "resolved": resolved}
+
+    # ── Auto-induction (events → insights) ─────────────────────────────
+
+    def auto_induct(self, dry_run: bool = False) -> dict[str, int]:
+        """Combine related event memories into insights using LLM.
+
+        Groups events by shared entities, then summarizes each group.
+        Returns {"groups": N, "inducted": N}.
+        """
+        if self._llm_judge is None:
+            return {"groups": 0, "inducted": 0}
+
+        events = [m for m in self._store.list_memories(layer="L1")
+                  if m.type == MemoryType.EVENT and len(m.content) > 20]
+        if len(events) < 3:
+            return {"groups": 0, "inducted": 0}
+
+        # Group events by shared entities
+        entity_groups: dict[str, list[MemoryUnit]] = defaultdict(list)
+        for event in events:
+            for eid in event.entities:
+                entity_groups[eid].append(event)
+
+        # Find groups with 3+ events sharing an entity
+        inducted = 0
+        processed_groups = 0
+        seen_event_ids: set[str] = set()
+
+        for eid, group_events in entity_groups.items():
+            # Deduplicate
+            unique_events = [e for e in group_events if e.id not in seen_event_ids]
+            if len(unique_events) < 3:
+                continue
+
+            # Don't create huge summaries
+            unique_events = unique_events[:10]
+
+            summary = self._llm_judge.summarize([e.content for e in unique_events])
+            if summary is None:
+                continue
+
+            processed_groups += 1
+
+            if not dry_run:
+                # Get the entity name for context
+                entity = self._store.get_entity(eid)
+                entity_name = entity.name if entity else eid
+
+                insight = MemoryUnit(
+                    content=f"[归纳自 {len(unique_events)} 条事件] {summary}",
+                    type=MemoryType.INSIGHT,
+                    importance=max(e.importance for e in unique_events),
+                    confidence=max(e.confidence for e in unique_events),
+                    source=f"auto_induction:{_utcnow().isoformat()}",
+                    entities=[eid],
+                    supersedes=",".join(e.id for e in unique_events),
+                    tags=["auto_inducted"],
+                    embedding=self._engine.embed(summary),
+                    layer="L1",
+                )
+                self._store.add_memory(insight)
+
+                # Archive original events
+                for e in unique_events:
+                    e.tags.append("inducted")
+                    self._store.update_memory(e)
+                    self._store.move_to_layer(e.id, "L2")
+                    seen_event_ids.add(e.id)
+
+                inducted += 1
+
+        return {"groups": processed_groups, "inducted": inducted}
+
+    # ── L2 compression ─────────────────────────────────────────────────
+
+    def compress_l2(self, max_group_size: int = 10, dry_run: bool = False) -> dict[str, int]:
+        """Compress L2 memories by summarizing groups of related memories.
+
+        Uses LLM to create concise summaries, replacing multiple old memories
+        with one compressed memory. Reduces L2 storage bloat.
+        Returns {"groups": N, "compressed": N, "memories_removed": N}.
+        """
+        if self._llm_judge is None:
+            return {"groups": 0, "compressed": 0, "memories_removed": 0}
+
+        l2 = self._store.list_memories(layer="L2")
+        if len(l2) < 5:
+            return {"groups": 0, "compressed": 0, "memories_removed": 0}
+
+        # Group L2 memories by type
+        type_groups: dict[MemoryType, list[MemoryUnit]] = defaultdict(list)
+        for m in l2:
+            # Skip already compressed or consolidated memories
+            if "compressed" in m.tags or "consolidated" in m.tags:
+                continue
+            type_groups[m.type].append(m)
+
+        compressed = 0
+        total_removed = 0
+        groups_processed = 0
+
+        for mem_type, memories in type_groups.items():
+            if len(memories) < 3:
+                continue
+
+            # Sort by importance (compress lowest importance first)
+            memories.sort(key=lambda m: m.importance)
+
+            # Process in batches
+            for batch_start in range(0, len(memories), max_group_size):
+                batch = memories[batch_start:batch_start + max_group_size]
+                if len(batch) < 3:
+                    continue
+
+                summary = self._llm_judge.summarize([m.content for m in batch])
+                if summary is None:
+                    continue
+
+                groups_processed += 1
+
+                if not dry_run:
+                    # Create compressed memory
+                    compressed_unit = MemoryUnit(
+                        content=f"[压缩自 {len(batch)} 条{mem_type.value}] {summary}",
+                        type=mem_type,
+                        importance=min(m.importance for m in batch),
+                        confidence=min(m.confidence for m in batch),
+                        source=f"l2_compression:{_utcnow().isoformat()}",
+                        entities=list({e for m in batch for e in m.entities}),
+                        supersedes=",".join(m.id for m in batch),
+                        tags=["compressed"],
+                        embedding=self._engine.embed(summary),
+                        layer="L2",
+                    )
+                    self._store.add_memory(compressed_unit)
+
+                    # Delete originals
+                    for m in batch:
+                        self._store.delete_memory(m.id)
+                        total_removed += 1
+
+                    compressed += 1
+
+        return {"groups": groups_processed, "compressed": compressed, "memories_removed": total_removed}
 
     # ── Layer management ────────────────────────────────────────────────
 

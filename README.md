@@ -1,6 +1,6 @@
 # GitMem0
 
-> v0.4.0 | Git x Mem0: A pure-local, version-controlled memory system for LLMs.
+> v0.4.1 | Git x Mem0: A pure-local, version-controlled memory system for LLMs.
 
 English | [中文](README_zh.md)
 

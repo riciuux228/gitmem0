@@ -406,11 +406,28 @@ class ExtractionEngine:
 
 
 def _split_segments(text: str) -> list[str]:
-    """Split text into candidate segments by sentence or logical chunk."""
+    """Split text into candidate segments by sentence or logical chunk.
+
+    Merges short fragments back with their neighbors to avoid breaking
+    code identifiers like Date.now() or paths like /usr/local/bin.
+    """
     segments = _SEGMENT_RE.findall(text)
     # Also split on newlines that weren't already caught
     expanded: list[str] = []
     for seg in segments:
         parts = [p.strip() for p in re.split(r"\n+", seg) if p.strip()]
         expanded.extend(parts)
-    return expanded
+
+    # Merge fragments back if they look like broken code identifiers.
+    # A segment that starts with lowercase or ( is likely a continuation
+    # of a code reference like Date.now() or console.log()
+    merged: list[str] = []
+    for seg in expanded:
+        seg = seg.strip()
+        if not seg:
+            continue
+        if merged and (seg[0].islower() or seg[0] == '('):
+            merged[-1] = merged[-1] + seg
+        else:
+            merged.append(seg)
+    return merged

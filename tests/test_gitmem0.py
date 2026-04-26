@@ -933,3 +933,154 @@ class TestMetrics:
         assert snap["uptime_seconds"] >= 0.1
 
 
+class TestSetup:
+    """Test gitmem0 setup logic."""
+
+    def test_detect_environment_generic(self, tmp_path):
+        from gitmem0.setup import detect_environment, Environment
+        assert detect_environment(tmp_path) == Environment.GENERIC
+
+    def test_detect_environment_claude_code(self, tmp_path):
+        from gitmem0.setup import detect_environment, Environment
+        (tmp_path / ".claude").mkdir()
+        assert detect_environment(tmp_path) == Environment.CLAUDE_CODE
+
+    def test_write_config_creates_file(self, tmp_path):
+        from gitmem0.setup import write_config, SetupConfig
+        config = SetupConfig(backend="ollama", api_key="")
+        path = write_config(config, tmp_path / "config.toml")
+        assert path.exists()
+        content = path.read_text(encoding="utf-8")
+        assert "[llm]" in content
+        assert 'backend = "ollama"' in content
+        assert 'api_key = ""' in content
+
+    def test_write_config_with_api_key(self, tmp_path):
+        from gitmem0.setup import write_config, SetupConfig
+        config = SetupConfig(backend="openai", api_key="sk-test123")
+        path = write_config(config, tmp_path / "config.toml")
+        content = path.read_text(encoding="utf-8")
+        assert 'api_key = "sk-test123"' in content
+
+    def test_write_config_preserves_existing_sections(self, tmp_path):
+        from gitmem0.setup import write_config, SetupConfig
+        initial = tmp_path / "config.toml"
+        initial.write_text(
+            '[storage]\ndb_path = "custom.db"\nactive_threshold = 0.3\n\n'
+            '[llm]\nbackend = "mimo"\n',
+            encoding="utf-8",
+        )
+        config = SetupConfig(backend="openai", api_key="sk-test")
+        write_config(config, initial)
+        content = initial.read_text(encoding="utf-8")
+        assert 'backend = "openai"' in content
+        assert "[storage]" in content
+        assert 'db_path = "custom.db"' in content
+        assert "active_threshold = 0.3" in content
+
+    def test_write_config_idempotent(self, tmp_path):
+        from gitmem0.setup import write_config, SetupConfig
+        config = SetupConfig(backend="ollama")
+        path = tmp_path / "config.toml"
+        write_config(config, path)
+        content1 = path.read_text(encoding="utf-8")
+        write_config(config, path)
+        content2 = path.read_text(encoding="utf-8")
+        assert content1 == content2
+
+    def test_write_config_creates_parent_dirs(self, tmp_path):
+        from gitmem0.setup import write_config, SetupConfig
+        config = SetupConfig(backend="ollama")
+        path = tmp_path / "deep" / "nested" / "config.toml"
+        write_config(config, path)
+        assert path.exists()
+
+    def test_init_database_creates_file(self, tmp_path):
+        from gitmem0.setup import init_database
+        db_path = str(tmp_path / "test.db")
+        result = init_database(db_path)
+        assert Path(result).exists()
+        assert Path(result).stat().st_size > 0
+
+    def test_init_database_idempotent(self, tmp_path):
+        from gitmem0.setup import init_database
+        db_path = str(tmp_path / "test.db")
+        init_database(db_path)
+        init_database(db_path)
+
+    def test_setup_config_defaults(self):
+        from gitmem0.setup import SetupConfig
+        config = SetupConfig()
+        assert config.backend == "ollama"
+        assert config.api_key == ""
+        assert config.model == ""
+        assert config.install_hooks is True
+        assert config.start_daemon is True
+        assert config.non_interactive is False
+
+    def test_backend_defaults_registry(self):
+        from gitmem0.setup import BACKEND_DEFAULTS
+        for key, info in BACKEND_DEFAULTS.items():
+            assert "label" in info
+            assert "requires_key" in info
+            assert "default_model" in info
+            assert isinstance(info["requires_key"], bool)
+
+    def test_run_setup_minimal(self, tmp_path, monkeypatch):
+        from gitmem0.setup import run_setup, SetupConfig
+        config = SetupConfig(
+            start_daemon=False,
+            install_hooks=False,
+            db_path=str(tmp_path / "test.db"),
+        )
+        monkeypatch.setattr("gitmem0.setup.CONFIG_PATH", tmp_path / "config.toml")
+        monkeypatch.setattr("gitmem0.setup.DB_PATH", tmp_path / "test.db")
+        result = run_setup(config)
+        assert result.config_path is not None
+        assert result.db_path is not None
+        assert result.daemon_running is False
+        assert result.hooks_installed is False
+        assert len(result.errors) == 0
+
+    def test_run_setup_result_fields(self, tmp_path, monkeypatch):
+        from gitmem0.setup import run_setup, SetupConfig
+        config = SetupConfig(
+            start_daemon=False,
+            install_hooks=False,
+            db_path=str(tmp_path / "test.db"),
+            backend="ollama",
+        )
+        monkeypatch.setattr("gitmem0.setup.CONFIG_PATH", tmp_path / "config.toml")
+        monkeypatch.setattr("gitmem0.setup.DB_PATH", tmp_path / "test.db")
+        result = run_setup(config)
+        assert result.backend == "ollama"
+        assert result.environment in ("claude_code", "generic")
+
+
+class TestSetupCLI:
+    """Test gitmem0 setup CLI command."""
+
+    def test_setup_help(self):
+        from typer.testing import CliRunner
+        from gitmem0.cli import app
+        runner = CliRunner()
+        result = runner.invoke(app, ["setup", "--help"])
+        assert result.exit_code == 0
+        assert "setup" in result.output.lower()
+
+    def test_setup_no_daemon_no_hooks(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+        from gitmem0.cli import app
+        monkeypatch.setattr("gitmem0.setup.CONFIG_PATH", tmp_path / "config.toml")
+        monkeypatch.setattr("gitmem0.setup.DB_PATH", tmp_path / "test.db")
+        monkeypatch.setattr("gitmem0.setup.GITMEM0_DIR", tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(app, [
+            "setup", "--non-interactive", "--no-daemon", "--no-hooks",
+        ])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["ok"] is True
+        assert data["data"]["daemon_running"] is False
+
+

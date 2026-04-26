@@ -1,6 +1,6 @@
 # GitMem0
 
-> v0.2.0 | Git x Mem0: A pure-local, version-controlled memory system for LLMs.
+> v0.4.0 | Git x Mem0: A pure-local, version-controlled memory system for LLMs.
 
 English | [中文](README_zh.md)
 
@@ -25,8 +25,12 @@ GitMem0 gives AI agents persistent memory without external APIs or cloud service
 # Install from PyPI
 pip install gitmem0
 
+# One-click setup (config, DB, daemon, hooks — all in one command)
+gitmem0 setup
+
 # Or install from source (development)
 pip install -e .
+gitmem0 setup
 
 # First call auto-starts daemon (loads model, ~30s), subsequent calls <0.1s
 python -m gitmem0.client '{"action":"remember","content":"I prefer dark mode","type":"preference","importance":0.9}'
@@ -59,6 +63,7 @@ auto.py daemon (port 19840, model loaded once)
 
 ```bash
 # Typer CLI (alternative to client.py)
+gitmem0 setup                                                # one-click setup
 python -m gitmem0.cli add "Python is great for prototyping" --type fact --importance 0.7
 python -m gitmem0.cli search "Python" --top 3
 python -m gitmem0.cli context "what languages does the user like"

@@ -136,6 +136,28 @@ def _err(msg: str) -> None:
     raise typer.Exit(code=1)
 
 
+def _print_setup_text(result) -> None:
+    """Human-readable setup output for --format text."""
+    print("GitMem0 Setup Complete")
+    print("=" * 40)
+    status = lambda ok: "OK" if ok else "SKIP"
+    print(f"  Config:    {result.config_path or 'FAILED'}")
+    print(f"  Database:  {result.db_path or 'FAILED'}")
+    print(f"  Daemon:    {status(result.daemon_running)}")
+    print(f"  Hooks:     {status(result.hooks_installed)}")
+    print(f"  CLAUDE.md: {status(result.claude_md_installed)}")
+    print(f"  Backend:   {result.backend}")
+    print(f"  Env:       {result.environment}")
+    if result.warnings:
+        print("\nWarnings:")
+        for w in result.warnings:
+            print(f"  ! {w}")
+    if result.errors:
+        print("\nErrors:")
+        for e in result.errors:
+            print(f"  X {e}")
+
+
 def _mem_json(m: MemoryUnit) -> dict:
     """Minimal memory representation for JSON output."""
     return {
@@ -161,6 +183,92 @@ def _entity_json(e) -> dict:
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
+
+
+@app.command()
+def setup(
+    non_interactive: bool = typer.Option(
+        False, "--non-interactive", "-n",
+        help="Use defaults, no prompts."
+    ),
+    backend: Optional[str] = typer.Option(
+        None, "--backend", "-b",
+        help="LLM backend: mimo, openai, claude, ollama."
+    ),
+    api_key: Optional[str] = typer.Option(
+        None, "--api-key", "-k",
+        help="API key for LLM backend."
+    ),
+    no_hooks: bool = typer.Option(
+        False, "--no-hooks",
+        help="Skip Claude Code hook installation."
+    ),
+    no_daemon: bool = typer.Option(
+        False, "--no-daemon",
+        help="Skip daemon startup."
+    ),
+    fmt: Optional[str] = typer.Option(
+        None, "--format", "-f",
+        help="json (default) or text."
+    ),
+) -> None:
+    """One-click setup: config, DB, daemon, hooks. Idempotent.
+
+    Interactive wizard by default. Use --non-interactive for CI/scripts.
+    Returns {ok, data: {config_path, db_path, daemon_running, ...}}.
+    """
+    from gitmem0.setup import (
+        SetupConfig, run_setup,
+        prompt_backend, prompt_api_key, BACKEND_DEFAULTS,
+    )
+
+    config = SetupConfig(non_interactive=non_interactive)
+
+    # Resolve backend
+    if backend is not None:
+        if backend not in BACKEND_DEFAULTS:
+            _err(f"Unknown backend '{backend}'. Use: {', '.join(BACKEND_DEFAULTS)}")
+        config.backend = backend
+    elif not non_interactive:
+        config.backend = prompt_backend()
+
+    # Resolve API key
+    if api_key is not None:
+        config.api_key = api_key
+    elif not non_interactive and BACKEND_DEFAULTS.get(
+        config.backend, {}
+    ).get("requires_key"):
+        config.api_key = prompt_api_key(config.backend)
+
+    # Apply flags
+    config.install_hooks = not no_hooks
+    config.start_daemon = not no_daemon
+
+    # Run setup
+    result = run_setup(config)
+
+    # Output
+    if fmt == "text":
+        _print_setup_text(result)
+    else:
+        data = {
+            "config_path": result.config_path,
+            "db_path": result.db_path,
+            "daemon_running": result.daemon_running,
+            "hooks_installed": result.hooks_installed,
+            "claude_md_installed": result.claude_md_installed,
+            "environment": result.environment,
+            "backend": result.backend,
+        }
+        if result.errors:
+            data["errors"] = result.errors
+        if result.warnings:
+            data["warnings"] = result.warnings
+        if result.errors:
+            print(json.dumps({"ok": False, "data": data}, ensure_ascii=False))
+            raise typer.Exit(code=1)
+        else:
+            _ok(data)
 
 
 @app.command()

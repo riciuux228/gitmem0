@@ -8,17 +8,33 @@ import sys
 from pathlib import Path
 
 
-def get_claude_settings_path() -> Path:
-    """Find the Claude Code settings file."""
-    project_settings = Path.cwd() / ".claude" / "settings.json"
+def get_claude_settings_path(project_dir: Path | None = None) -> Path:
+    """Find the Claude Code settings file.
+
+    Args:
+        project_dir: Project directory to check for .claude/ dir.
+                     Defaults to Path.cwd() if not provided.
+    """
+    project_dir = project_dir or Path.cwd()
+    project_settings = project_dir / ".claude" / "settings.json"
     if project_settings.parent.exists():
         return project_settings
     user_settings = Path.home() / ".claude" / "settings.json"
     return user_settings
 
 
-def setup():
-    settings_path = get_claude_settings_path()
+def install_hooks(project_dir: Path | None = None) -> dict:
+    """Install Stop hook for memory extraction.
+
+    Args:
+        project_dir: Project directory. Defaults to Path.cwd().
+
+    Returns:
+        {"hooks_installed": True, "settings_path": str}
+
+    Idempotent: overwrites hooks section cleanly.
+    """
+    settings_path = get_claude_settings_path(project_dir)
     settings_path.parent.mkdir(parents=True, exist_ok=True)
 
     settings = {}
@@ -35,7 +51,6 @@ def setup():
         settings["hooks"] = {}
 
     # Stop hook: extract memories when AI finishes responding
-    # This is the correct Claude Code event for "after response"
     settings["hooks"]["Stop"] = [
         {
             "matcher": "",
@@ -52,8 +67,13 @@ def setup():
         json.dumps(settings, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    return {"hooks_installed": True, "settings_path": str(settings_path)}
 
-    print(f"GitMem0 hooks configured in: {settings_path}")
+
+def setup():
+    """Backward-compatible wrapper for CLI usage."""
+    result = install_hooks()
+    print(f"GitMem0 hooks configured in: {result['settings_path']}")
     print("  - Stop: auto-extract memories when AI finishes responding")
     print("\nRestart Claude Code to activate hooks.")
     print("\nNote: For auto-context injection, add the memory system prompt")

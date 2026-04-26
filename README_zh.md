@@ -1,6 +1,6 @@
 # GitMem0
 
-> v0.2.0 | Git x Mem0：纯本地、版本控制的 LLM 记忆系统。
+> v0.4.0 | Git x Mem0：纯本地、版本控制的 LLM 记忆系统。
 
 GitMem0 为 AI 智能体提供持久化记忆，无需外部 API 或云服务。它将 Git 式版本追踪与 Mem0 的智能记忆层结合——全部运行在你的本机上。
 
@@ -25,8 +25,12 @@ GitMem0 为 AI 智能体提供持久化记忆，无需外部 API 或云服务。
 # 从 PyPI 安装
 pip install gitmem0
 
+# 一键配置（自动创建配置、数据库、启动守护进程、安装 hooks）
+gitmem0 setup
+
 # 或从源码安装（开发）
 pip install -e .
+gitmem0 setup
 
 # 首次调用自动启动守护进程（加载模型，约 30s），后续调用 <0.1s
 python -m gitmem0.client '{"action":"remember","content":"我喜欢深色模式","type":"preference","importance":0.9}'
@@ -59,6 +63,7 @@ auto.py 守护进程（端口 19840，模型只加载一次）
 
 ```bash
 # Typer CLI（client.py 的替代方案）
+gitmem0 setup                                                # 一键配置
 python -m gitmem0.cli add "Python 适合快速原型开发" --type fact --importance 0.7
 python -m gitmem0.cli search "Python" --top 3
 python -m gitmem0.cli context "用户喜欢什么编程语言"

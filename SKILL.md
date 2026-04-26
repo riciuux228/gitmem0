@@ -300,6 +300,10 @@ model = "MiMo"
 ## Quick Start
 
 ```bash
+# Install from PyPI
+pip install gitmem0
+
+# Or install from source (development)
 pip install -e .
 
 # First call loads model (~30s), subsequent calls <0.05s

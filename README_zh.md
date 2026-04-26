@@ -22,6 +22,10 @@ GitMem0 为 AI 智能体提供持久化记忆，无需外部 API 或云服务。
 ## 快速开始
 
 ```bash
+# 从 PyPI 安装
+pip install gitmem0
+
+# 或从源码安装（开发）
 pip install -e .
 
 # 首次调用自动启动守护进程（加载模型，约 30s），后续调用 <0.1s

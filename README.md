@@ -22,6 +22,10 @@ GitMem0 gives AI agents persistent memory without external APIs or cloud service
 ## Quick Start
 
 ```bash
+# Install from PyPI
+pip install gitmem0
+
+# Or install from source (development)
 pip install -e .
 
 # First call auto-starts daemon (loads model, ~30s), subsequent calls <0.1s
